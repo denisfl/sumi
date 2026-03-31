@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>sumi — Tokyo Night system monitor</title>
+  <meta name="description" content="Lightweight, zero-dependency system monitor for macOS, Linux and Raspberry Pi. Tokyo Night TUI, written in Go.">
+  <style>
+    :root {
+      --bg:       #1a1b26;
+      --bg2:      #16161e;
+      --surface:  #1e202e;
+      --border:   #565f89;
+      --text:     #c0caf5;
+      --dim:      #565f89;
+      --title:    #7aa2f7;
+      --green:    #9ece6a;
+      --yellow:   #e0af68;
+      --red:      #f7768e;
+      --cyan:     #7dcfff;
+      --purple:   #bb9af7;
+      --orange:   #ff9e64;
+      --teal:     #2ac3de;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'SF Mono', 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    /* ---- Header ---- */
+    header {
+      width: 100%;
+      max-width: 880px;
+      padding: 48px 24px 32px;
+      text-align: center;
+    }
+
+    header h1 {
+      font-size: 2rem;
+      font-weight: 700;
+      color: var(--title);
+      letter-spacing: -0.5px;
+    }
+
+    header p {
+      margin-top: 10px;
+      color: var(--dim);
+      font-size: 0.95rem;
+    }
+
+    /* ---- Terminal window ---- */
+    .terminal-wrap {
+      width: 100%;
+      max-width: 880px;
+      padding: 0 24px 32px;
+    }
+
+    .terminal {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    .terminal-bar {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+    }
+
+    .dot-red    { background: #ff5f57; }
+    .dot-yellow { background: #ffbd2e; }
+    .dot-green  { background: #28c840; }
+
+    .terminal-title {
+      margin-left: 8px;
+      color: var(--dim);
+      font-size: 0.8rem;
+    }
+
+    .terminal-body {
+      padding: 16px 20px;
+      overflow-x: auto;
+    }
+
+    pre {
+      font-size: 0.78rem;
+      line-height: 1.45;
+      white-space: pre;
+      color: var(--text);
+    }
+
+    /* ANSI color spans */
+    .c-border  { color: var(--border); }
+    .c-title   { color: var(--title); }
+    .c-text    { color: var(--text); }
+    .c-dim     { color: var(--dim); }
+    .c-green   { color: var(--green); }
+    .c-yellow  { color: var(--yellow); }
+    .c-red     { color: var(--red); }
+    .c-cyan    { color: var(--cyan); }
+    .c-orange  { color: var(--orange); }
+    .c-purple  { color: var(--purple); }
+    .c-teal    { color: var(--teal); }
+
+    /* ---- Features ---- */
+    .features {
+      width: 100%;
+      max-width: 880px;
+      padding: 0 24px 32px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+    }
+
+    .feature {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px 20px;
+    }
+
+    .feature h3 {
+      color: var(--cyan);
+      font-size: 0.85rem;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+
+    .feature p {
+      color: var(--dim);
+      font-size: 0.8rem;
+      line-height: 1.5;
+    }
+
+    /* ---- Install block ---- */
+    .install {
+      width: 100%;
+      max-width: 880px;
+      padding: 0 24px 32px;
+    }
+
+    .install h2 {
+      color: var(--title);
+      font-size: 1.1rem;
+      margin-bottom: 16px;
+    }
+
+    .install-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+      gap: 16px;
+    }
+
+    .code-block {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 16px;
+    }
+
+    .code-block .label {
+      color: var(--dim);
+      font-size: 0.72rem;
+      margin-bottom: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .code-block code {
+      display: block;
+      color: var(--green);
+      font-size: 0.8rem;
+      line-height: 1.7;
+      white-space: pre;
+      overflow-x: auto;
+    }
+
+    /* ---- Footer ---- */
+    footer {
+      margin-top: auto;
+      padding: 24px;
+      color: var(--dim);
+      font-size: 0.78rem;
+      text-align: center;
+    }
+
+    footer a {
+      color: var(--title);
+      text-decoration: none;
+    }
+
+    footer a:hover {
+      color: var(--cyan);
+    }
+
+    footer .sep {
+      margin: 0 10px;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>sumi</h1>
+    <p>Lightweight zero-dependency system monitor &mdash; macOS, Linux, Raspberry Pi &mdash; Tokyo Night TUI</p>
+  </header>
+
+  <!-- Terminal demo -->
+  <div class="terminal-wrap">
+    <div class="terminal">
+      <div class="terminal-bar">
+        <div class="dot dot-red"></div>
+        <div class="dot dot-yellow"></div>
+        <div class="dot dot-green"></div>
+        <span class="terminal-title">sumi &mdash; bash</span>
+      </div>
+      <div class="terminal-body">
+        <pre><span class="c-border">╭─ </span><span class="c-title">THERMAL</span><span class="c-border"> ──────────────────────────╮ ╭─ </span><span class="c-title">CPU</span><span class="c-border"> ──────────────────────────────╮</span>
+<span class="c-border">├────────────────────────────────────┤ ├────────────────────────────────────┤</span>
+<span class="c-border">│</span> <span class="c-dim">temp  </span> <span class="c-green">55.2°C</span>                      <span class="c-border">│ │</span> <span class="c-dim">load  </span> <span class="c-yellow">█████████████</span><span class="c-dim">░░░░░░░░░░░░░░░</span><span class="c-border">│</span>
+<span class="c-border">│</span> <span class="c-dim">arm   </span> <span class="c-orange">1800 MHz</span>                    <span class="c-border">│ │</span>                                    <span class="c-border">│</span>
+<span class="c-border">│</span> <span class="c-dim">gpu   </span> <span class="c-purple">750 MHz</span>                     <span class="c-border">│ │</span> <span class="c-dim">cores </span> <span class="c-text">4</span>                           <span class="c-border">│</span>
+<span class="c-border">│</span> <span class="c-dim">thrt  </span> <span class="c-green">ok</span>                          <span class="c-border">│ │</span>                                    <span class="c-border">│</span>
+<span class="c-border">╰────────────────────────────────────╯ ╰────────────────────────────────────╯</span>
+
+<span class="c-border">╭─ </span><span class="c-title">Memory</span><span class="c-border"> ───────────────────────────╮ ╭─ </span><span class="c-title">Disk</span><span class="c-border"> ─────────────────────────────╮</span>
+<span class="c-border">│</span><span class="c-cyan">Total:</span> <span class="c-text">8.00 GiB</span>                    <span class="c-border">│ │</span><span class="c-cyan">Mount:</span>  <span class="c-text">/</span>                           <span class="c-border">│</span>
+<span class="c-border">│</span><span class="c-cyan">Used:</span>  <span class="c-yellow">5.12 GiB</span>                    <span class="c-border">│ │</span><span class="c-cyan">Total:</span>  <span class="c-text">120.00 GiB</span>                  <span class="c-border">│</span>
+<span class="c-border">│</span><span class="c-cyan">Free:</span>  <span class="c-green">2.88 GiB</span>                    <span class="c-border">│ │</span><span class="c-cyan">Used:</span>   <span class="c-green">42.30 GiB</span>                   <span class="c-border">│</span>
+<span class="c-border">│</span><span class="c-cyan">Usage:</span> <span class="c-yellow">64.0%</span>                        <span class="c-border">│ │</span><span class="c-cyan">Free:</span>   <span class="c-green">77.70 GiB</span>                   <span class="c-border">│</span>
+<span class="c-border">│</span><span class="c-yellow">████████████████████</span><span class="c-dim">░░░░░░░░░░░░░░  </span><span class="c-border">│ │</span><span class="c-cyan">Usage:</span>  <span class="c-green">35.2%</span>                       <span class="c-border">│</span>
+<span class="c-border">│</span><span class="c-cyan">Swap:</span>  <span class="c-yellow">1.50 GiB</span> <span class="c-text">/ 2.00 GiB</span>          <span class="c-border">│ │</span><span class="c-green">███████████</span><span class="c-dim">░░░░░░░░░░░░░░░░░░░░░░  </span><span class="c-border">│</span>
+<span class="c-border">│</span><span class="c-yellow">███████████████████████████████</span><span class="c-dim">░░░  </span><span class="c-border">│ ╰────────────────────────────────────╯</span>
+<span class="c-border">╰────────────────────────────────────╯</span>
+
+<span class="c-border">╭─ </span><span class="c-title">Network</span><span class="c-border"> ──────────────────────────╮ ╭─ </span><span class="c-title">Top Processes</span><span class="c-border"> ────────────────────╮</span>
+<span class="c-border">│</span><span class="c-cyan">Iface:</span> <span class="c-text">eth0</span>                         <span class="c-border">│ │</span><span class="c-dim">NAME                   CPU%   MEM%</span>  <span class="c-border">│</span>
+<span class="c-border">│</span><span class="c-cyan">IP:</span>    <span class="c-text">192.168.1.42</span>                 <span class="c-border">│ │</span><span class="c-text">chromium              </span> <span class="c-red">38.0</span>    <span class="c-teal">5.2</span>  <span class="c-border">│</span>
+<span class="c-border">│</span><span class="c-cyan">Rx:</span>    <span class="c-green">124.6 KB/s</span>                   <span class="c-border">│ │</span><span class="c-text">Xorg                  </span> <span class="c-green">12.4</span>    <span class="c-teal">1.8</span>  <span class="c-border">│</span>
+<span class="c-border">│</span><span class="c-cyan">Tx:</span>    <span class="c-orange">18.3 KB/s</span>                    <span class="c-border">│ │</span><span class="c-text">code                  </span>  <span class="c-green">8.2</span>    <span class="c-teal">3.4</span>  <span class="c-border">│</span>
+<span class="c-border">╰────────────────────────────────────╯ │</span><span class="c-text">bash                  </span>  <span class="c-green">0.5</span>    <span class="c-teal">0.1</span>  <span class="c-border">│</span>
+                                       <span class="c-border">│</span><span class="c-text">sshd                  </span>  <span class="c-green">0.1</span>    <span class="c-teal">0.0</span>  <span class="c-border">│</span>
+                                       <span class="c-border">╰────────────────────────────────────╯</span>
+
+<span class="c-border">╭─ </span><span class="c-title">System</span><span class="c-border"> ─────────────────────────────────────────────────────────────────────╮</span>
+<span class="c-border">├──────────────────────────────────────────────────────────────────────────────┤</span>
+<span class="c-border">│</span> <span class="c-dim">host      </span> <span class="c-cyan">raspberrypi         </span> <span class="c-dim">platform  </span> <span class="c-text">rpi           </span> <span class="c-dim">date  </span> <span class="c-text">2026-03-31</span>   <span class="c-border">│</span>
+<span class="c-border">│</span> <span class="c-dim">uptime    </span> <span class="c-green">12d 04:21:07        </span> <span class="c-dim">time      </span> <span class="c-text">18:42:05</span>                          <span class="c-border">│</span>
+<span class="c-border">╰──────────────────────────────────────────────────────────────────────────────╯</span></pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- Features -->
+  <div class="features">
+    <div class="feature">
+      <h3>Zero dependencies</h3>
+      <p>Single static binary. No libraries, no runtime, no sudo required.</p>
+    </div>
+    <div class="feature">
+      <h3>Multi-platform</h3>
+      <p>macOS (Apple Silicon &amp; Intel), Linux x86_64, Raspberry Pi arm64/armv7.</p>
+    </div>
+    <div class="feature">
+      <h3>Tokyo Night TUI</h3>
+      <p>ANSI TrueColor, bento-grid layout, Unicode box-drawing borders.</p>
+    </div>
+    <div class="feature">
+      <h3>Raspberry Pi</h3>
+      <p>ARM/GPU frequency, throttle status via <code>vcgencmd</code>.</p>
+    </div>
+    <div class="feature">
+      <h3>JSON output</h3>
+      <p>Pipe-friendly machine-readable snapshot. Works with <code>jq</code>.</p>
+    </div>
+    <div class="feature">
+      <h3>Watch mode</h3>
+      <p>Continuous refresh at configurable interval. <code>--watch --interval 3</code></p>
+    </div>
+  </div>
+
+  <!-- Install -->
+  <div class="install">
+    <h2>Install</h2>
+    <div class="install-grid">
+      <div class="code-block">
+        <div class="label">macOS — Apple Silicon</div>
+        <code>curl -L https://github.com/denisfl/sumi/releases/latest/download/sumi-darwin-arm64.tar.gz | tar xz
+sudo mv sumi /usr/local/bin/</code>
+      </div>
+      <div class="code-block">
+        <div class="label">Linux — x86_64</div>
+        <code>curl -L https://github.com/denisfl/sumi/releases/latest/download/sumi-linux-amd64.tar.gz | tar xz
+sudo mv sumi /usr/local/bin/</code>
+      </div>
+      <div class="code-block">
+        <div class="label">Raspberry Pi — arm64</div>
+        <code>curl -L https://github.com/denisfl/sumi/releases/latest/download/sumi-linux-arm64.tar.gz | tar xz
+sudo mv sumi /usr/local/bin/</code>
+      </div>
+      <div class="code-block">
+        <div class="label">Build from source (Go 1.22+)</div>
+        <code>git clone https://github.com/denisfl/sumi.git
+cd sumi
+go build -o sumi ./cmd/monitor</code>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <a href="https://github.com/denisfl/sumi">GitHub</a>
+    <span class="sep">&middot;</span>
+    <a href="https://bsky.app/profile/fedosov.me">@fedosov.me</a>
+    <span class="sep">&middot;</span>
+    MIT License
+  </footer>
+
+</body>
+</html>

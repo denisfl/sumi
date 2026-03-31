@@ -1,0 +1,30 @@
+# Build outputs
+sumi
+/dist/
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Agent / AI tooling
+.agents/
+.claude/
+.pi/
+
+# Project context (local notes, not part of source)
+.project/
+
+# OpenSpec work (local planning, not part of source)
+spec/
+
+# Skills lockfile (local tooling state)
+skills-lock.json
+
+# Go test cache
+*.test
+*.prof
