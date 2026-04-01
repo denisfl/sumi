@@ -435,7 +435,9 @@ func linuxDisk(ctx context.Context) model.DiskInfo {
 	d.UsedBytes = used * 1024
 	d.FreeBytes = avail * 1024
 	return d
-} entries and returns
+}
+
+// linuxThermalSensors reads all thermal_zone entries and returns
 // named ThermalSensor values. Zone type names are mapped to friendly labels.
 func linuxThermalSensors() []model.ThermalSensor {
 	var sensors []model.ThermalSensor
