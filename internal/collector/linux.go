@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"sumi/internal/model"
@@ -27,7 +28,17 @@ func New() Collector {
 	return &linuxCollector{}
 }
 
-type linuxCollector struct{}
+type linuxCollector struct {
+	mu              sync.Mutex
+	diskStatsPrev   map[string]diskstatEntry // keyed by device name (e.g. "sda")
+	diskStatsTime   time.Time
+}
+
+// diskstatEntry holds the cumulative sector counts from /proc/diskstats.
+type diskstatEntry struct {
+	readiSectors  uint64
+	writeSectors uint64
+}
 
 func (c *linuxCollector) Collect(ctx context.Context) (model.Snapshot, error) {
 	s := model.Snapshot{
@@ -38,6 +49,7 @@ func (c *linuxCollector) Collect(ctx context.Context) (model.Snapshot, error) {
 	s.CPU = linuxCPU(ctx)
 	s.Mem = linuxMem()
 	s.Disks = linuxDisks(ctx)
+	c.applyDiskIO(s.Disks)
 	s.Net = linuxNet()
 	s.Procs = linuxProcs(ctx)
 	s.Thermal.TempC = linuxThermal()
@@ -312,6 +324,133 @@ func linuxProcs(ctx context.Context) []model.ProcEntry {
 		count++
 	}
 	return procs
+}
+
+// applyDiskIO reads /proc/diskstats, diffs against the previous sample, and
+// annotates each DiskInfo.ReadKBps / WriteKBps with the measured throughput.
+// /proc/diskstats fields (1-indexed): major minor devname reads_completed ... sectors_read ... writes_completed ... sectors_written ...
+// Field offsets (0-based after devname): reads=1, sectors_read=3, writes=5, sectors_written=7
+func (c *linuxCollector) applyDiskIO(disks []model.DiskInfo) {
+	now := time.Now()
+	cur, err := readDiskstats()
+	if err != nil {
+		return
+	}
+	// Build mount → device mapping via /proc/mounts.
+	mountTodev := linuxMountToDev()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	prev := c.diskStatsPrev
+	elapsed := now.Sub(c.diskStatsTime).Seconds()
+
+	// Store current for next call.
+	c.diskStatsPrev = cur
+	c.diskStatsTime = now
+
+	if prev == nil || elapsed <= 0 {
+		// First sample — no delta yet.
+		return
+	}
+
+	for i := range disks {
+		dev := mountTodev[disks[i].MountPoint]
+		if dev == "" {
+			continue
+		}
+		prevE, ok := prev[dev]
+		if !ok {
+			continue
+		}
+		curE, ok := cur[dev]
+		if !ok {
+			continue
+		}
+		const sectorSize = 512 // Linux always uses 512-byte sectors in diskstats
+		if curE.readiSectors >= prevE.readiSectors {
+			disks[i].ReadKBps = float64(curE.readiSectors-prevE.readiSectors) * sectorSize / 1024.0 / elapsed
+		}
+		if curE.writeSectors >= prevE.writeSectors {
+			disks[i].WriteKBps = float64(curE.writeSectors-prevE.writeSectors) * sectorSize / 1024.0 / elapsed
+		}
+	}
+}
+
+// readDiskstats parses /proc/diskstats and returns a map of device → sector counts.
+func readDiskstats() (map[string]diskstatEntry, error) {
+	data, err := os.ReadFile("/proc/diskstats")
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]diskstatEntry)
+	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		// /proc/diskstats: major minor name r_cmpl r_mrg r_sect r_ms w_cmpl w_mrg w_sect ...
+		if len(fields) < 10 {
+			continue
+		}
+		dev := fields[2]
+		rSect, _ := strconv.ParseUint(fields[5], 10, 64)
+		wSect, _ := strconv.ParseUint(fields[9], 10, 64)
+		result[dev] = diskstatEntry{readiSectors: rSect, writeSectors: wSect}
+	}
+	return result, nil
+}
+
+// linuxMountToDev reads /proc/mounts and returns a map of mount-point → device-name.
+// Device names are stripped of /dev/ prefix and partition numbers to match diskstats entries.
+// e.g. "/dev/sda1" -> "sda", "/dev/nvme0n1p1" -> "nvme0n1"
+func linuxMountToDev() map[string]string {
+	result := make(map[string]string)
+	data, err := os.ReadFile("/proc/mounts")
+	if err != nil {
+		return result
+	}
+	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 2 {
+			continue
+		}
+		dev := fields[0]
+		mount := fields[1]
+		// Only physical devices.
+		if !strings.HasPrefix(dev, "/dev/") {
+			continue
+		}
+		devName := strings.TrimPrefix(dev, "/dev/")
+		// Strip partition suffix: sda1 -> sda, nvme0n1p1 -> nvme0n1, mmcblk0p1 -> mmcblk0
+		devName = stripPartitionSuffix(devName)
+		result[mount] = devName
+	}
+	return result
+}
+
+// stripPartitionSuffix returns the base device name without the partition identifier.
+// sda1 -> sda, nvme0n1p3 -> nvme0n1, mmcblk0p1 -> mmcblk0, hda2 -> hda
+func stripPartitionSuffix(dev string) string {
+	// NVMe/MMC style: ends with pN where preceding char is a digit.
+	for i := len(dev) - 1; i > 0; i-- {
+		if dev[i] >= '0' && dev[i] <= '9' {
+			continue
+		}
+		if dev[i] == 'p' && i > 0 && dev[i-1] >= '0' && dev[i-1] <= '9' {
+			return dev[:i]
+		}
+		break
+	}
+	// SATA/IDE style: strip trailing digits from device name with mixed alpha/digits.
+	i := len(dev) - 1
+	for i >= 0 && dev[i] >= '0' && dev[i] <= '9' {
+		i--
+	}
+	// Only strip if remainder is non-empty and ends in a letter (sda1 -> sda, not just "1")
+	if i >= 0 && i < len(dev)-1 && dev[i] >= 'a' && dev[i] <= 'z' {
+		return dev[:i+1]
+	}
+	return dev
 }
 
 // linuxDisks parses df -B1 -T output and returns non-virtual mount points.

@@ -47,6 +47,12 @@ func main() {
 
 	showVersion := flag.Bool("version", false, "print version and exit")
 	initConfig := flag.Bool("init-config", false, "write default config to ~/.config/sumi/config.toml and exit")
+
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: sumi [flags]\n\nFlags:\n")
+		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\nNDJSON streaming (pipe-friendly):\n  sumi --watch --renderer json | jq '.CPU.Usage'\n")
+	}
 	flag.Parse()
 
 	if *showVersion {
@@ -96,15 +102,27 @@ func main() {
 	const ringCap = 120
 	cpuRing := history.NewRing(ringCap)
 	memRing := history.NewRing(ringCap)
+	rxRing := history.NewRing(ringCap)
+	txRing := history.NewRing(ringCap)
 
 	if !*watch {
-		runOnce(ctx, col, rdr, cpuRing, memRing, nil)
+		runOnce(ctx, col, rdr, cpuRing, memRing, rxRing, txRing, nil)
 		return
 	}
 
+	// Watch mode: when streaming JSON (NDJSON), skip TUI cursor/screen management
+	// and emit one compact JSON object per line so the output is pipe-friendly.
+	// Usage: sumi --watch --renderer json | jq '.CPU.Usage'
+	isNDJSON := *rendererName == "json"
+	if isNDJSON {
+		rdr = renderer.NewNDJSON()
+	}
+
 	// Watch mode
-	renderer.HideCursor()
-	defer renderer.ShowCursor()
+	if !isNDJSON {
+		renderer.HideCursor()
+		defer renderer.ShowCursor()
+	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -240,11 +258,11 @@ func main() {
 		}
 	}
 
-	runOnce(ctx, col, rdr, cpuRing, memRing, doRender)
+	runOnce(ctx, col, rdr, cpuRing, memRing, rxRing, txRing, doRender)
 	for {
 		select {
 		case <-ticker.C:
-			runOnce(ctx, col, rdr, cpuRing, memRing, doRender)
+			runOnce(ctx, col, rdr, cpuRing, memRing, rxRing, txRing, doRender)
 		case ch := <-keyCh:
 			handleKey(ch)
 		case <-ctx.Done():
@@ -254,7 +272,7 @@ func main() {
 }
 
 func runOnce(ctx context.Context, col collector.Collector, rdr renderer.Renderer,
-	cpuRing, memRing *history.Ring, renderFn func(model.Snapshot)) {
+	cpuRing, memRing, rxRing, txRing *history.Ring, renderFn func(model.Snapshot)) {
 	snap, err := col.Collect(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "collect error: %v\n", err)
@@ -264,9 +282,13 @@ func runOnce(ctx context.Context, col collector.Collector, rdr renderer.Renderer
 	if snap.Mem.TotalBytes > 0 {
 		memRing.Push(float64(snap.Mem.UsedBytes) / float64(snap.Mem.TotalBytes) * 100.0)
 	}
+	rxRing.Push(snap.Net.RxKBps)
+	txRing.Push(snap.Net.TxKBps)
 	const sparkWidth = 30
 	snap.History.CPUSpark = cpuRing.Sparkline(sparkWidth)
 	snap.History.MemSpark = memRing.Sparkline(sparkWidth)
+	snap.History.NetRxSpark = rxRing.Sparkline(sparkWidth)
+	snap.History.NetTxSpark = txRing.Sparkline(sparkWidth)
 
 	if renderFn != nil {
 		renderFn(snap)

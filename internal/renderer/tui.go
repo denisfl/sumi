@@ -130,21 +130,21 @@ func (r *tuiRenderer) renderFull(s model.Snapshot, width int) error {
 
 	// Row 1: Thermal (narrow) + CPU (wide)
 	printRow(r.renderThermalCard(s, narrow), r.renderCPUCard(s, wide))
-	fmt.Fprintln(os.Stdout)
+	fmt.Fprint(os.Stdout, "\r\n")
 
 	// GPU card (full width, optional)
 	if s.GPU != nil {
 		printCard(r.renderGPUCard(s, width))
-		fmt.Fprintln(os.Stdout)
+		fmt.Fprint(os.Stdout, "\r\n")
 	}
 
 	// Row 2: Memory (narrow) + Disk (wide)
 	printRow(r.renderMemCard(s, narrow), r.renderDiskCard(s, wide))
-	fmt.Fprintln(os.Stdout)
+	fmt.Fprint(os.Stdout, "\r\n")
 
 	// Row 3: Network (narrow) + Top Processes (wide)
 	printRow(r.renderNetCard(s, narrow), r.renderProcsCard(s, wide))
-	fmt.Fprintln(os.Stdout)
+	fmt.Fprint(os.Stdout, "\r\n")
 
 	// Row 4: System (full width)
 	printCard(r.renderSystemCard(s, width))
@@ -157,7 +157,7 @@ printRow(
 r.renderCompactCard("THERMAL", r.compactThermalLine(s), 0, half),
 r.renderCompactCard("CPU", r.compactCPULine(s), s.CPU.Usage, half),
 )
-fmt.Fprintln(os.Stdout)
+fmt.Fprint(os.Stdout, "\r\n")
 memPct := 0.0
 if s.Mem.TotalBytes > 0 {
 memPct = float64(s.Mem.UsedBytes) / float64(s.Mem.TotalBytes) * 100.0
@@ -173,7 +173,7 @@ printRow(
 r.renderCompactCard("MEM", r.compactMemLine(s, memPct), memPct, half),
 r.renderCompactCard("DISK", r.compactDiskLine(s, diskPct), diskPct, half),
 )
-fmt.Fprintln(os.Stdout)
+fmt.Fprint(os.Stdout, "\r\n")
 printRow(
 r.renderCompactCard("NET", r.compactNetLine(s), -1, half),
 r.renderCompactCard("SYSTEM", r.compactSysLine(s), -1, half),
@@ -267,7 +267,7 @@ func (r *tuiRenderer) compactThermalLine(s model.Snapshot) string {
 
 func printCard(lines []string) {
 for _, l := range lines {
-fmt.Fprintln(os.Stdout, l)
+fmt.Fprint(os.Stdout, l+"\r\n")
 }
 }
 
@@ -293,7 +293,7 @@ l = left[i]
 if i < len(right) {
 r = right[i]
 }
-fmt.Fprintf(os.Stdout, "%s %s\n", l, r)
+		fmt.Fprint(os.Stdout, l+" "+r+"\r\n")
 }
 }
 
@@ -433,8 +433,15 @@ func (r *tuiRenderer) renderDiskCard(s model.Snapshot, w int) []string {
 			mnt = "\u2026" + mnt[len(mnt)-mountMaxW+1:]
 		}
 		lines = append(lines, r.cardLine(fmt.Sprintf("%s%s%s%s", r.tc.cyan, mnt, colReset, suffix), w))
-		// Line 2: progress bar.
-		lines = append(lines, r.cardLine(" "+r.progressBar(pct/100.0, barW), w))
+		// Line 2: progress bar + optional I/O speed.
+		barLine := " " + r.progressBar(pct/100.0, barW)
+		if d.ReadKBps > 0 || d.WriteKBps > 0 {
+			ioStr := fmt.Sprintf("  %s↓%s %s%s%s  %s↑%s %s%s%s",
+				r.tc.green, colReset, colDim, fmtKBps(d.ReadKBps), colReset,
+				r.tc.orange, colReset, colDim, fmtKBps(d.WriteKBps), colReset)
+			barLine += ioStr
+		}
+		lines = append(lines, r.cardLine(barLine, w))
 	}
 
 	lines = append(lines, r.cardBottom(w))
@@ -454,7 +461,13 @@ lines := []string{r.cardTop("Network", w)}
 lines = append(lines, r.cardLine(fmt.Sprintf("%sIface:%s %s%s%s", r.tc.cyan, colReset, r.tc.text, iface, colReset), w))
 lines = append(lines, r.cardLine(fmt.Sprintf("%sIP:%s    %s%s%s", r.tc.cyan, colReset, r.tc.text, ip, colReset), w))
 lines = append(lines, r.cardLine(fmt.Sprintf("%sRx:%s    %s%.2f KB/s%s", r.tc.cyan, colReset, r.tc.green, s.Net.RxKBps, colReset), w))
+if s.History.NetRxSpark != "" {
+	lines = append(lines, r.cardLine(fmt.Sprintf(" %s%s%s", r.tc.green, s.History.NetRxSpark, colReset), w))
+}
 lines = append(lines, r.cardLine(fmt.Sprintf("%sTx:%s    %s%.2f KB/s%s", r.tc.cyan, colReset, r.tc.orange, s.Net.TxKBps, colReset), w))
+if s.History.NetTxSpark != "" {
+	lines = append(lines, r.cardLine(fmt.Sprintf(" %s%s%s", r.tc.orange, s.History.NetTxSpark, colReset), w))
+}
 lines = append(lines, r.cardBottom(w))
 return lines
 }
@@ -763,6 +776,18 @@ return fmt.Sprintf("%.2f KiB", float64(b)/kib)
 default:
 return fmt.Sprintf("%d B", b)
 }
+}
+
+// fmtKBps formats a KB/s value as a human-readable rate string.
+func fmtKBps(kbps float64) string {
+	switch {
+	case kbps >= 1024*1024:
+		return fmt.Sprintf("%.1f GB/s", kbps/1024/1024)
+	case kbps >= 1024:
+		return fmt.Sprintf("%.1f MB/s", kbps/1024)
+	default:
+		return fmt.Sprintf("%.0f KB/s", kbps)
+	}
 }
 
 func visibleLen(s string) int {

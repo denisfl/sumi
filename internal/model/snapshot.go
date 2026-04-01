@@ -54,6 +54,8 @@ type DiskInfo struct {
 	FreeBytes  uint64
 	MountPoint string
 	FSType     string
+	ReadKBps   float64 // read throughput in KB/s since last sample (0 when unavailable)
+	WriteKBps  float64 // write throughput in KB/s since last sample (0 when unavailable)
 }
 
 // GPUInfo holds GPU metrics. Nil when no supported GPU tool is available.
@@ -77,8 +79,10 @@ type Net struct {
 // History holds pre-computed sparkline strings for the TUI renderer.
 // Empty when running in single-shot mode.
 type History struct {
-	CPUSpark string
-	MemSpark string
+	CPUSpark   string
+	MemSpark   string
+	NetRxSpark string // Rx throughput history (green)
+	NetTxSpark string // Tx throughput history (orange)
 }
 
 // Snapshot is the complete point-in-time view of system metrics.

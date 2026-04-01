@@ -24,7 +24,17 @@ func New() Collector {
 	return &darwinCollector{}
 }
 
-type darwinCollector struct{}
+// diskIOSample holds a single cumulative read/write counter snapshot.
+type diskIOSample struct {
+	bytes uint64
+	at    time.Time
+}
+
+type darwinCollector struct {
+	mu          sync.Mutex
+	diskReadPrev  map[string]diskIOSample // keyed by device name (e.g. "disk0")
+	diskWritePrev map[string]diskIOSample
+}
 
 func (c *darwinCollector) Collect(ctx context.Context) (model.Snapshot, error) {
 	s := model.Snapshot{
@@ -62,6 +72,7 @@ func (c *darwinCollector) Collect(ctx context.Context) (model.Snapshot, error) {
 
 	s.Mem = collectMem(ctx)
 	s.Disks = collectDisks(ctx)
+	c.applyDiskIO(ctx, s.Disks)
 	s.Procs = collectProcs(ctx)
 	s.Hostname, _ = os.Hostname()
 	s.Uptime = collectUptimeDarwin(ctx)
@@ -349,6 +360,141 @@ func parseSizeToBytes(s string) uint64 {
 		return uint64(v * 1024 * 1024 * 1024)
 	}
 	return uint64(v)
+}
+
+// applyDiskIO annotates each DiskInfo with per-second KB read/write
+// by parsing `iostat -d` cumulative totals and diffing against the previous sample.
+// Device-to-mount mapping uses the device field from `df` output (already known from DiskInfo.FSType / name).
+// We use `iostat -d -c 1` which prints a header + one data row per disk device.
+func (c *darwinCollector) applyDiskIO(ctx context.Context, disks []model.DiskInfo) {
+	tctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	// iostat -d -c 1: columns are device-name groups repeated:
+	//   "          disk0              disk1"
+	//   "    KB/t  tps  MB/s     KB/t  tps  MB/s"
+	//   "  XXXXX  YYY  ZZZ.ZZ  ..."
+	// We use -K to get KB/t in KB (not 512-byte units), but MB read/written are cumulative.
+	// iostat -I -d -c 1 gives cumulative MB read/written.
+	out, err := runCmd(tctx, "iostat", "-I", "-d", "-c", "1")
+	if err != nil {
+		return
+	}
+	readKB, writeKB := parseIostatI(out)
+	now := time.Now()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.diskReadPrev == nil {
+		// First sample — just store and return (no delta yet)
+		c.diskReadPrev = make(map[string]diskIOSample)
+		c.diskWritePrev = make(map[string]diskIOSample)
+		for dev, kb := range readKB {
+			c.diskReadPrev[dev] = diskIOSample{bytes: kb * 1024, at: now}
+		}
+		for dev, kb := range writeKB {
+			c.diskWritePrev[dev] = diskIOSample{bytes: kb * 1024, at: now}
+		}
+		return
+	}
+
+	// Build delta rates and annotate disks.
+	// macOS mount points come from df -k; the device is the first column (e.g. /dev/disk3s1).
+	// We normalise device name to the base disk name (disk0, disk1...) for iostat matching.
+	for i := range disks {
+		// Extract base disk from FSType field which carries the raw device path.
+		dev := baseDiskName(disks[i].FSType)
+		rKB, rOK := readKB[dev]
+		wKB, wOK := writeKB[dev]
+		if !rOK && !wOK {
+			continue
+		}
+		prevR := c.diskReadPrev[dev]
+		prevW := c.diskWritePrev[dev]
+		elapsed := now.Sub(prevR.at).Seconds()
+		if elapsed <= 0 {
+			continue
+		}
+		if rOK && rKB*1024 >= prevR.bytes {
+			disks[i].ReadKBps = float64(rKB*1024-prevR.bytes) / 1024.0 / elapsed
+		}
+		if wOK && wKB*1024 >= prevW.bytes {
+			disks[i].WriteKBps = float64(wKB*1024-prevW.bytes) / 1024.0 / elapsed
+		}
+		c.diskReadPrev[dev] = diskIOSample{bytes: rKB * 1024, at: now}
+		c.diskWritePrev[dev] = diskIOSample{bytes: wKB * 1024, at: now}
+	}
+}
+
+// parseIostatI parses `iostat -I -d -c 1` output and returns cumulative KB read/written
+// per device name. iostat -I prints:
+//
+//	         disk0
+//	    KB/t  xfrs    MB
+//	  256.00    42  10.5
+//
+// With multiple devices the device names span the first header row and stats repeat.
+func parseIostatI(out string) (readKB, writeKB map[string]uint64) {
+	readKB = make(map[string]uint64)
+	writeKB = make(map[string]uint64)
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) < 3 {
+		return
+	}
+	// Line 0: device names, padded in groups of 3 columns (15 chars each group).
+	// Line 1: column headers repeated per device.
+	// Line 2+: data rows.
+	// Each device block = 3 fields: KB/t  xfrs  MB  (when -I is used: KB/t tps MB_read MB_write)
+	// Actually iostat -I -d on macOS produces 4 columns per device: KB/t xfrs MBrd MBwt
+	deviceLine := lines[0]
+	dataLine := ""
+	for _, l := range lines[2:] {
+		l = strings.TrimSpace(l)
+		if l != "" {
+			dataLine = l
+			break
+		}
+	}
+	if dataLine == "" {
+		return
+	}
+	// Extract device names from the header line (each device takes ~20 chars).
+	// Use a simpler split: fields in the data line correspond positionally.
+	devNames := parseIostatDeviceNames(deviceLine)
+	dataFields := strings.Fields(dataLine)
+	// Each device has 4 fields: KB/t xfrs MB_read MB_write
+	const colsPerDev = 4
+	for i, dev := range devNames {
+		offset := i * colsPerDev
+		if offset+colsPerDev > len(dataFields) {
+			break
+		}
+		// MB_read and MB_write are floats
+		mbRead, _ := strconv.ParseFloat(dataFields[offset+2], 64)
+		mbWrite, _ := strconv.ParseFloat(dataFields[offset+3], 64)
+		readKB[dev] = uint64(mbRead * 1024)
+		writeKB[dev] = uint64(mbWrite * 1024)
+	}
+	return
+}
+
+// parseIostatDeviceNames extracts device names from the iostat header line.
+// Example: "          disk0              disk1"
+func parseIostatDeviceNames(line string) []string {
+	return strings.Fields(line)
+}
+
+// baseDiskName extracts the base disk identifier from a macOS device path.
+// "/dev/disk3s5" -> "disk3", "disk0" -> "disk0".
+func baseDiskName(s string) string {
+	s = strings.TrimPrefix(s, "/dev/")
+	// Strip partition suffix: disk3s5 -> disk3
+	for i := len(s) - 1; i > 0; i-- {
+		if s[i] == 's' && i > 0 && s[i-1] >= '0' && s[i-1] <= '9' {
+			return s[:i]
+		}
+	}
+	return s
 }
 
 // collectDisks reads df output and returns physical mount points (virtual FSes excluded).
