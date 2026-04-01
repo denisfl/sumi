@@ -4,7 +4,7 @@
 
 ## Overview
 
-sumi is a zero-dependency Go CLI that renders live system metrics in a bento-grid TUI. It collects CPU usage (aggregate + per-core), memory, swap, disk, network Rx/Tx, top processes, and thermal data, then renders them in colored cards using ANSI TrueColor. A JSON output mode makes it pipe-friendly for scripting. All appearance settings are configurable via CLI flags or a TOML config file.
+sumi is a zero-dependency Go CLI that renders live system metrics in a bento-grid TUI. It collects CPU usage (aggregate + per-core), memory, swap, disk (with real-time I/O KB/s), network Rx/Tx (with sparkline history), top processes (with Docker/k8s container badges), thermal data, battery status, and GPU info, then renders them in colored cards using ANSI TrueColor. An NDJSON streaming mode (`--watch --renderer json`) makes it pipe-friendly for `jq`/Grafana/Prometheus. All appearance settings are configurable via CLI flags or a TOML config file.
 
 ## Quick Start
 
@@ -34,11 +34,13 @@ sumi --list-themes
 ## Key Concepts
 
 - **Snapshot**: A point-in-time capture of all system metrics (`internal/model.Snapshot`). Collected once per render cycle.
-- **Collector**: Platform-specific goroutine that fills a `Snapshot`. Darwin and Linux have separate implementations with build tags.
-- **Renderer**: Consumes a `Snapshot` and writes output. Two renderers: `tui` (default, ANSI TrueColor) and `json`.
+- **Collector**: Platform-specific goroutine that fills a `Snapshot`. Darwin and Linux have separate implementations with build tags. Stateful collectors (disk I/O, battery) store previous samples between ticks for delta calculations.
+- **Renderer**: Consumes a `Snapshot` and writes output. Two renderers: `tui` (default, ANSI TrueColor) and `json`/`ndjson` (compact per-line JSON for streaming).
 - **Theme**: A set of 10 RGB colors (border, title, text, green, yellow, red, cyan, purple, orange, teal) loaded from embedded TOML files. User themes override built-ins.
 - **BoxChars**: A set of 8 Unicode box-drawing characters for card borders. Four styles: rounded, sharp, double, bold.
 - **Config**: TOML file at `~/.config/sumi/config.toml`. CLI flags always override config file values.
+- **History Rings**: Fixed-capacity ring buffers (`internal/history.Ring`) updated each tick. Power sparklines for CPU, Mem, Net Rx, Net Tx (global, cap 120) and per-PID CPU/Mem (cap 60).
+- **Detail Panel**: Per-process detail overlay rendered after the main view. Shows PPID, threads, FD count, cwd, start time, and CPU/Mem sparklines. Opened with the `d` key.
 
 ## CLI Flags
 
@@ -118,13 +120,17 @@ r = 255; g = 158; b = 100
 r = 42; g = 195; b = 222
 ```
 
-## JSON Output
+## JSON / NDJSON Output
 
 ```bash
+# Single snapshot JSON
 sumi --renderer json
+
+# NDJSON stream (one object per line) — pipe-friendly
+sumi --watch --renderer json | jq '.CPU.Usage'
 ```
 
-Returns a flat JSON object. Useful fields:
+Useful fields in the JSON object:
 
 ```json
 {
@@ -132,36 +138,42 @@ Returns a flat JSON object. Useful fields:
   "Platform": "darwin",
   "Hostname": "macbook",
   "Uptime": "2d 03:14:22",
-  "CPU": { "Usage": 34.2, "Cores": 10, "CoreUsages": [45.1, 22.3, ...] },
+  "CPU": { "Usage": 34.2, "Cores": 10, "CoreUsages": [45.1, 22.3] },
   "Mem": { "TotalBytes": 17179869184, "UsedBytes": 9663676416, "FreeBytes": 7516192768, "SwapTotal": 2147483648, "SwapUsed": 536870912 },
-  "Disk": { "MountPoint": "/", "TotalBytes": 494384795648, "UsedBytes": 214748364800, "FreeBytes": 279636430848 },
+  "Disks": [{ "MountPoint": "/", "TotalBytes": 494384795648, "UsedBytes": 214748364800, "FreeBytes": 279636430848, "ReadKBps": 128.4, "WriteKBps": 32.1 }],
   "Net": { "Interface": "en0", "IP": "192.168.1.10", "RxKBps": 18.4, "TxKBps": 2.1 },
   "Thermal": { "TempC": 55.2, "ArmFreqMHz": 0, "GpuFreqMHz": 0, "Throttled": "" },
-  "Procs": [{ "Name": "chrome", "CPUPct": 22.1, "MemPct": 3.4 }, ...]
+  "Battery": { "ChargePct": 87.0, "Charging": false, "TimeLeft": "2h 14m" },
+  "Procs": [{ "Name": "chrome", "PID": 1234, "CPUPct": 22.1, "MemPct": 3.4, "Container": "" }],
+  "History": { "CPUSpark": "▁▂▃▅▇", "MemSpark": "▃▃▄▄▅", "NetRxSpark": "▁▁▂▄▇", "NetTxSpark": "▁▁▁▂▁" }
 }
 ```
 
 ## Project Layout
 
 ```
-cmd/monitor/main.go          — entry point, flag parsing, theme loading
+cmd/monitor/main.go          — entry point, flag parsing, theme loading, per-PID rings, detail panel
 internal/
   collector/
-    darwin.go                — macOS: top, netstat, osx-cpu-temp, sysctl
-    linux.go                 — Linux: /proc/stat, /proc/meminfo, /sys/class/net
+    darwin.go                — macOS: top, netstat, osx-cpu-temp, sysctl, iostat (disk I/O), pmset (battery)
+    linux.go                 — Linux: /proc/stat, /proc/meminfo, /sys/class/net, /proc/diskstats (disk I/O), /sys/class/power_supply (battery), cgroup container detection
+    procdetail_darwin.go     — macOS ReadProcDetail via ps + lsof
+    procdetail_linux.go      — Linux ReadProcDetail via /proc/PID/{status,fd,cwd,stat}
     rpi.go                   — Raspberry Pi extras: vcgencmd, thermal zone
     collector.go             — Collector interface
   config/
     config.go                — Config struct, Load(), Default(), DefaultConfigContent
   model/
-    snapshot.go              — Snapshot, CPU, Mem, Disk, Net, Thermal, ProcInfo structs
+    snapshot.go              — Snapshot, CPU, Mem, DiskInfo (w/ ReadKBps/WriteKBps), Net, Thermal, ProcEntry (w/ Container), BatteryInfo, ProcDetail structs
   renderer/
     renderer.go              — Renderer interface, New(cfg, theme, box) factory
-    tui.go                   — TUI renderer: card layout, progress bars, color helpers
-    json.go                  — JSON renderer
+    tui.go                   — TUI renderer: card layout, progress bars, color helpers, RenderDetailPanel()
+    json.go                  — JSON renderer + ndjsonRenderer (compact per-line)
   theme/
     theme.go                 — Theme struct, Color, BoxChars, Load(), ListBuiltin(), BoxStyle()
     themes/*.toml            — Embedded built-in theme files
+  history/
+    ring.go                  — Ring buffer + Sparkline() method
 ```
 
 ## Platform Requirements
@@ -170,8 +182,20 @@ internal/
 |---|---|
 | macOS (Apple Silicon) | Temperature requires building `smctemp` from source: https://github.com/narugit/smctemp |
 | macOS (Intel) | Temperature requires `brew install osx-cpu-temp` (or `smctemp`) |
-| Linux x86_64 | No extra dependencies |
+| Linux x86_64 | No extra dependencies; container badge detection via `/proc/PID/cgroup` |
 | Raspberry Pi arm64 / armv7 | Full thermal via `vcgencmd` (Raspberry Pi OS) |
+
+## Interactive Keybindings (watch mode)
+
+| Key | Action |
+|---|---|
+| `q` / `Ctrl+C` | Quit |
+| `v` | Toggle compact / full layout |
+| `t` | Cycle to next theme |
+| `j` / `k` | Move selection down / up in Top Processes |
+| `s` | Toggle sort column: CPU% ↔ MEM% |
+| `d` | Open process detail panel; press again or `Esc` to close |
+| `Enter` | Prompt to SIGTERM selected process |
 
 ## Common LLM Tasks
 
@@ -182,6 +206,14 @@ internal/
 **"Add a new card"**: Add a field to `internal/model/snapshot.go`, collect data in `darwin.go`/`linux.go`, implement `renderXxxCard()` in `tui.go`, add it to the `renderFull()` call sequence and the default `widgets` list in `config.go`.
 
 **"Add a new flag"**: Declare with `flag.String/Bool/Int` in `main.go` after `flag.Parse()`, override the corresponding `cfg` field, pass updated values to `renderer.New(cfg, t, bc)`.
+
+**"Understand disk I/O"**: `darwinCollector`/`linuxCollector` are stateful structs with `sync.Mutex` + previous-sample maps. `applyDiskIO()` diffs against the stored sample each tick. On darwin: `iostat -I -d -c 1`. On Linux: `/proc/diskstats` sectors * 512 bytes / elapsed time.
+
+**"Understand battery card"**: `collectBatteryDarwin()` parses `pmset -g batt`. `linuxBattery()` reads `/sys/class/power_supply/*/type` == `"Battery"`, then `capacity`, `status`, `current_now`, `charge_now`. Returns nil on desktop/server (no battery directory).
+
+**"Understand container badges"**: `procContainer(pid)` reads `/proc/PID/cgroup` lines. Strings `docker-` or `/docker/` → `"docker"`; `kubepods` → `"k8s"`. Empty for bare-metal.
+
+**"Understand process detail panel"**: `collector.ReadProcDetail(pid)` is platform-specific (build-tag files). In `main.go` watch loop, `detailPID` tracks the open panel, `pidCPURings`/`pidMemRings` accumulate history. `renderer.RenderDetailPanel(det)` is a standalone exported function (not part of Renderer interface) called after `rdr.Render(snap)`.
 
 ## References
 

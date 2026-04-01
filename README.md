@@ -39,7 +39,13 @@ A lightweight, zero-dependency system monitor for macOS, Linux, and Raspberry Pi
 
 ## Features
 
-- **4-row, 2-column bento grid** — THERMAL, CPU, Memory, Disk, Network, Top Processes, System
+- **4-row, 2-column bento grid** — THERMAL, CPU, Memory, Disk, Network, Top Processes, Battery (optional), System
+- **Disk I/O speed** — real-time read/write KB/s per mount point shown under the disk bar
+- **Network sparkline history** — rolling 30-sample sparklines for Rx (green) and Tx (orange) in the Network card
+- **Battery card** — charge percentage, charging status, and time-remaining; auto-hidden on desktops/servers (no battery)
+- **Container badges** — `[d]` / `[k]` prefix in Top Processes when a process runs inside Docker or Kubernetes
+- **Process detail panel** — press `d` to open a per-process panel with PPID, threads, open FDs, cwd, start time, and scrolling CPU/Mem sparklines; press `d` or `Esc` to close
+- **NDJSON streaming** — `--watch --renderer json` emits one compact JSON object per line, pipe-friendly for `jq`/Grafana/Prometheus scrapers
 - **6 built-in color themes** — tokyo-night (default), gruvbox, catppuccin-mocha, nord, dracula, one-dark
 - **4 border styles** — rounded (default), sharp, double, bold
 - **Compact mode** — condensed 4-line cards (`--compact`) for smaller terminals
@@ -51,6 +57,18 @@ A lightweight, zero-dependency system monitor for macOS, Linux, and Raspberry Pi
 - **Watch mode** — refresh every N seconds (`--watch --interval 5`)
 - **TOML config file** — persistent settings at `~/.config/sumi/config.toml`
 - **Zero runtime dependencies** — single static binary
+
+### Interactive keybindings (watch mode)
+
+| Key            | Action                                                                        |
+| -------------- | ----------------------------------------------------------------------------- |
+| `q` / `Ctrl+C` | Quit                                                                          |
+| `v`            | Toggle compact / full mode                                                    |
+| `t`            | Cycle to next color theme                                                     |
+| `j` / `k`      | Move selection down / up in Top Processes                                     |
+| `s`            | Toggle sort by CPU% / MEM%                                                    |
+| `d`            | Open process detail panel for selected process; press again or `Esc` to close |
+| `Enter`        | Prompt to send SIGTERM to selected process                                    |
 
 ## Installation
 
@@ -128,6 +146,9 @@ sumi --list-themes
 
 # JSON output (pipe-friendly)
 sumi --renderer json | jq .CPU.Usage
+
+# NDJSON streaming (one JSON object per line — for pipes, Grafana, etc.)
+sumi --watch --renderer json | jq '.CPU.Usage'
 ```
 
 ## Configuration
@@ -244,13 +265,13 @@ sumi tries `osx-cpu-temp` first, then falls back to `smctemp` automatically. Onc
 
 ## Platforms
 
-| Platform              | CPU | Memory | Disk | Network | Thermal                           |
-| --------------------- | --- | ------ | ---- | ------- | --------------------------------- |
-| macOS (Apple Silicon) | Yes | Yes    | Yes  | Yes     | via `smctemp` (build from source) |
-| macOS (Intel)         | Yes | Yes    | Yes  | Yes     | via `osx-cpu-temp` or `smctemp`   |
-| Linux x86_64          | Yes | Yes    | Yes  | Yes     | `/sys/class/thermal`              |
-| Raspberry Pi (arm64)  | Yes | Yes    | Yes  | Yes     | Full (vcgencmd)                   |
-| Raspberry Pi (armv7)  | Yes | Yes    | Yes  | Yes     | Full (vcgencmd)                   |
+| Platform              | CPU | Memory | Disk | Disk I/O | Network | Thermal                           | Battery | Containers |
+| --------------------- | --- | ------ | ---- | -------- | ------- | --------------------------------- | ------- | ---------- |
+| macOS (Apple Silicon) | Yes | Yes    | Yes  | Yes      | Yes     | via `smctemp` (build from source) | Yes     | —          |
+| macOS (Intel)         | Yes | Yes    | Yes  | Yes      | Yes     | via `osx-cpu-temp` or `smctemp`   | Yes     | —          |
+| Linux x86_64          | Yes | Yes    | Yes  | Yes      | Yes     | `/sys/class/thermal`              | Yes     | Docker/k8s |
+| Raspberry Pi (arm64)  | Yes | Yes    | Yes  | Yes      | Yes     | Full (vcgencmd)                   | —       | Docker/k8s |
+| Raspberry Pi (armv7)  | Yes | Yes    | Yes  | Yes      | Yes     | Full (vcgencmd)                   | —       | Docker/k8s |
 
 ## License
 
