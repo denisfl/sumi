@@ -1,0 +1,51 @@
+name = "gruvbox"
+
+[border]
+r = 80
+g = 73
+b = 69
+
+[title]
+r = 131
+g = 165
+b = 152
+
+[text]
+r = 235
+g = 219
+b = 178
+
+[green]
+r = 184
+g = 187
+b = 38
+
+[yellow]
+r = 215
+g = 153
+b = 33
+
+[red]
+r = 251
+g = 73
+b = 52
+
+[cyan]
+r = 131
+g = 165
+b = 152
+
+[purple]
+r = 211
+g = 134
+b = 155
+
+[orange]
+r = 254
+g = 128
+b = 25
+
+[teal]
+r = 142
+g = 192
+b = 124

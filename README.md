@@ -40,13 +40,17 @@ A lightweight, zero-dependency system monitor for macOS, Linux, and Raspberry Pi
 ## Features
 
 - **4-row, 2-column bento grid** — THERMAL, CPU, Memory, Disk, Network, Top Processes, System
-- **Tokyo Night color palette** — ANSI TrueColor, no terminal emulator flicker
+- **6 built-in color themes** — tokyo-night (default), gruvbox, catppuccin-mocha, nord, dracula, one-dark
+- **4 border styles** — rounded (default), sharp, double, bold
+- **Compact mode** — condensed 4-line cards (`--compact`) for smaller terminals
+- **Per-core CPU micro-bars** — Unicode bar chart when per-core data is available
 - **Raspberry Pi support** — ARM/GPU frequency, throttle status via `vcgencmd`
 - **macOS support** — temperature via `osx-cpu-temp` (optional), swap, real Rx/Tx KB/s delta
 - **Linux support** — `/proc/stat` CPU delta, `/proc/meminfo`, `/sys/class/net`, thermal zone
 - **JSON output mode** — pipe-friendly, machine-readable snapshot via `--renderer json`
 - **Watch mode** — refresh every N seconds (`--watch --interval 5`)
-- **Zero dependencies** — single static binary, no runtime libraries required
+- **TOML config file** — persistent settings at `~/.config/sumi/config.toml`
+- **Zero runtime dependencies** — single static binary
 
 ## Installation
 
@@ -92,10 +96,16 @@ Requires Go 1.22 or later.
 sumi [flags]
 
 Flags:
-  -w, --watch             Run in watch mode (refresh continuously)
-  -n, --interval int      Refresh interval in seconds (default 5)
-      --renderer string   Output renderer: tui or json (default "tui")
-  -h, --help              Show help
+  -w, --watch               Run in watch mode (refresh continuously)
+  -n, --interval int        Refresh interval in seconds (default 5)
+      --renderer string     Output renderer: tui or json (default "tui")
+      --compact             Use compact (4-line) card layout
+      --theme string        Color theme name (default "tokyo-night")
+      --border string       Border style: rounded|sharp|double|bold (default "rounded")
+      --list-themes         List available themes and exit
+      --init-config         Write default config to ~/.config/sumi/config.toml and exit
+      --version             Print version and exit
+  -h, --help                Show help
 ```
 
 ### Examples
@@ -107,9 +117,109 @@ sumi
 # Watch mode, refresh every 3 seconds
 sumi --watch --interval 3
 
+# Use gruvbox theme with bold borders
+sumi --theme gruvbox --border bold
+
+# Compact layout with Catppuccin Mocha theme
+sumi --compact --theme catppuccin-mocha
+
+# List all available themes
+sumi --list-themes
+
 # JSON output (pipe-friendly)
 sumi --renderer json | jq .CPU.Usage
 ```
+
+## Configuration
+
+sumi reads a TOML config file at `~/.config/sumi/config.toml`  
+(or `$XDG_CONFIG_HOME/sumi/config.toml` if set).
+
+### Generate default config
+
+```bash
+sumi --init-config
+```
+
+This writes an annotated config to `~/.config/sumi/config.toml`:
+
+```toml
+# sumi configuration — https://github.com/denisfl/sumi
+
+# Refresh interval in seconds (watch mode)
+interval = 5
+
+# Output renderer: "tui" or "json"
+renderer = "tui"
+
+# Color theme. Built-in: tokyo-night, gruvbox, catppuccin-mocha, nord, dracula, one-dark
+theme = "tokyo-night"
+
+# Card border style: "rounded", "sharp", "double", "bold"
+border_style = "rounded"
+
+# Show compact (3-line) cards instead of full detail cards
+compact_mode = false
+
+# Card order (remove a name to hide that card)
+widgets = ["thermal", "cpu", "memory", "disk", "network", "processes", "system"]
+```
+
+### Config options
+
+| Key            | Type     | Default         | Description                                        |
+| -------------- | -------- | --------------- | -------------------------------------------------- |
+| `interval`     | int      | `5`             | Refresh interval in seconds (watch mode)           |
+| `renderer`     | string   | `"tui"`         | Output renderer: `tui` or `json`                   |
+| `theme`        | string   | `"tokyo-night"` | Color theme name                                   |
+| `border_style` | string   | `"rounded"`     | Border style: `rounded`, `sharp`, `double`, `bold` |
+| `compact_mode` | bool     | `false`         | Use compact card layout                            |
+| `widgets`      | []string | all             | Card order; remove a name to hide that card        |
+
+CLI flags always override config file values.
+
+### Custom themes
+
+Place a custom TOML theme file at `~/.config/sumi/themes/<name>.toml`.  
+User themes take precedence over built-ins with the same name.
+
+Theme file format:
+
+```toml
+name = "my-theme"
+
+[border]
+r = 86; g = 95; b = 137
+
+[title]
+r = 122; g = 162; b = 247
+
+[text]
+r = 192; g = 202; b = 245
+
+[green]
+r = 158; g = 206; b = 106
+
+[yellow]
+r = 224; g = 175; b = 104
+
+[red]
+r = 247; g = 118; b = 142
+
+[cyan]
+r = 125; g = 207; b = 255
+
+[purple]
+r = 187; g = 154; b = 247
+
+[orange]
+r = 255; g = 158; b = 100
+
+[teal]
+r = 42; g = 195; b = 222
+```
+
+Once installed, the THERMAL card will show the real CPU temperature automatically.
 
 ### Optional: macOS temperature
 
@@ -123,13 +233,13 @@ Once installed, the THERMAL card will show the real CPU temperature automaticall
 
 ## Platforms
 
-| Platform | CPU | Memory | Disk | Network | Thermal |
-|---|---|---|---|---|---|
-| macOS (Apple Silicon) | Yes | Yes | Yes | Yes | via `osx-cpu-temp` |
-| macOS (Intel) | Yes | Yes | Yes | Yes | via `osx-cpu-temp` |
-| Linux x86_64 | Yes | Yes | Yes | Yes | `/sys/class/thermal` |
-| Raspberry Pi (arm64) | Yes | Yes | Yes | Yes | Full (vcgencmd) |
-| Raspberry Pi (armv7) | Yes | Yes | Yes | Yes | Full (vcgencmd) |
+| Platform              | CPU | Memory | Disk | Network | Thermal              |
+| --------------------- | --- | ------ | ---- | ------- | -------------------- |
+| macOS (Apple Silicon) | Yes | Yes    | Yes  | Yes     | via `osx-cpu-temp`   |
+| macOS (Intel)         | Yes | Yes    | Yes  | Yes     | via `osx-cpu-temp`   |
+| Linux x86_64          | Yes | Yes    | Yes  | Yes     | `/sys/class/thermal` |
+| Raspberry Pi (arm64)  | Yes | Yes    | Yes  | Yes     | Full (vcgencmd)      |
+| Raspberry Pi (armv7)  | Yes | Yes    | Yes  | Yes     | Full (vcgencmd)      |
 
 ## License
 

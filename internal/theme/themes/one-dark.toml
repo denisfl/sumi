@@ -1,0 +1,51 @@
+name = "one-dark"
+
+[border]
+r = 92
+g = 99
+b = 112
+
+[title]
+r = 97
+g = 175
+b = 239
+
+[text]
+r = 171
+g = 178
+b = 191
+
+[green]
+r = 152
+g = 195
+b = 121
+
+[yellow]
+r = 229
+g = 192
+b = 123
+
+[red]
+r = 224
+g = 108
+b = 117
+
+[cyan]
+r = 86
+g = 182
+b = 194
+
+[purple]
+r = 198
+g = 120
+b = 221
+
+[orange]
+r = 209
+g = 154
+b = 102
+
+[teal]
+r = 86
+g = 182
+b = 194

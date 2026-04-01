@@ -1,0 +1,51 @@
+name = "tokyo-night"
+
+[border]
+r = 86
+g = 95
+b = 137
+
+[title]
+r = 122
+g = 162
+b = 247
+
+[text]
+r = 192
+g = 202
+b = 245
+
+[green]
+r = 158
+g = 206
+b = 106
+
+[yellow]
+r = 224
+g = 175
+b = 104
+
+[red]
+r = 247
+g = 118
+b = 142
+
+[cyan]
+r = 125
+g = 207
+b = 255
+
+[purple]
+r = 187
+g = 154
+b = 247
+
+[orange]
+r = 255
+g = 158
+b = 100
+
+[teal]
+r = 42
+g = 195
+b = 222

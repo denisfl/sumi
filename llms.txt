@@ -1,0 +1,190 @@
+# sumi
+
+> Lightweight terminal system monitor for macOS, Linux, and Raspberry Pi — single static binary, TOML config, 6 built-in color themes.
+
+## Overview
+
+sumi is a zero-dependency Go CLI that renders live system metrics in a bento-grid TUI. It collects CPU usage (aggregate + per-core), memory, swap, disk, network Rx/Tx, top processes, and thermal data, then renders them in colored cards using ANSI TrueColor. A JSON output mode makes it pipe-friendly for scripting. All appearance settings are configurable via CLI flags or a TOML config file.
+
+## Quick Start
+
+```bash
+# Install pre-built binary (macOS Apple Silicon example)
+curl -L https://github.com/denisfl/sumi/releases/latest/download/sumi-darwin-arm64.tar.gz | tar xz
+sudo mv sumi /usr/local/bin/
+
+# Or build from source (requires Go 1.22+)
+git clone https://github.com/denisfl/sumi.git
+cd sumi
+go build -o sumi ./cmd/monitor
+
+# Run single snapshot
+sumi
+
+# Watch mode, gruvbox theme, sharp borders
+sumi --watch --interval 3 --theme gruvbox --border sharp
+
+# Generate default config file
+sumi --init-config
+
+# List available themes
+sumi --list-themes
+```
+
+## Key Concepts
+
+- **Snapshot**: A point-in-time capture of all system metrics (`internal/model.Snapshot`). Collected once per render cycle.
+- **Collector**: Platform-specific goroutine that fills a `Snapshot`. Darwin and Linux have separate implementations with build tags.
+- **Renderer**: Consumes a `Snapshot` and writes output. Two renderers: `tui` (default, ANSI TrueColor) and `json`.
+- **Theme**: A set of 10 RGB colors (border, title, text, green, yellow, red, cyan, purple, orange, teal) loaded from embedded TOML files. User themes override built-ins.
+- **BoxChars**: A set of 8 Unicode box-drawing characters for card borders. Four styles: rounded, sharp, double, bold.
+- **Config**: TOML file at `~/.config/sumi/config.toml`. CLI flags always override config file values.
+
+## CLI Flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `-w`, `--watch` | false | Continuous watch mode |
+| `-n`, `--interval int` | 5 | Refresh interval in seconds |
+| `--renderer string` | `tui` | Output renderer: `tui` or `json` |
+| `--compact` | false | Compact 4-line card layout |
+| `--theme string` | `tokyo-night` | Color theme name |
+| `--border string` | `rounded` | Border style: `rounded`, `sharp`, `double`, `bold` |
+| `--list-themes` | — | Print available theme names and exit |
+| `--init-config` | — | Write annotated default config to `~/.config/sumi/config.toml` and exit |
+| `--version` | — | Print version and exit |
+
+## Config File
+
+Location: `~/.config/sumi/config.toml` (or `$XDG_CONFIG_HOME/sumi/config.toml`)
+
+Generate with: `sumi --init-config`
+
+```toml
+interval = 5
+renderer = "tui"
+theme = "tokyo-night"
+border_style = "rounded"
+compact_mode = false
+widgets = ["thermal", "cpu", "memory", "disk", "network", "processes", "system"]
+```
+
+All keys are optional — missing keys use defaults. CLI flags always override config file values.
+
+## Built-in Themes
+
+- `tokyo-night` — default dark theme (blue/purple palette)
+- `gruvbox` — warm retro colors
+- `catppuccin-mocha` — pastel dark theme
+- `nord` — arctic, bluish palette
+- `dracula` — dark purple/pink palette
+- `one-dark` — Atom One Dark palette
+
+## Custom Theme Format
+
+Place at `~/.config/sumi/themes/<name>.toml`. User themes take precedence over built-ins.
+
+```toml
+name = "my-theme"
+
+[border]
+r = 86; g = 95; b = 137
+
+[title]
+r = 122; g = 162; b = 247
+
+[text]
+r = 192; g = 202; b = 245
+
+[green]
+r = 158; g = 206; b = 106
+
+[yellow]
+r = 224; g = 175; b = 104
+
+[red]
+r = 247; g = 118; b = 142
+
+[cyan]
+r = 125; g = 207; b = 255
+
+[purple]
+r = 187; g = 154; b = 247
+
+[orange]
+r = 255; g = 158; b = 100
+
+[teal]
+r = 42; g = 195; b = 222
+```
+
+## JSON Output
+
+```bash
+sumi --renderer json
+```
+
+Returns a flat JSON object. Useful fields:
+
+```json
+{
+  "Timestamp": "2026-04-01T18:42:05Z",
+  "Platform": "darwin",
+  "Hostname": "macbook",
+  "Uptime": "2d 03:14:22",
+  "CPU": { "Usage": 34.2, "Cores": 10, "CoreUsages": [45.1, 22.3, ...] },
+  "Mem": { "TotalBytes": 17179869184, "UsedBytes": 9663676416, "FreeBytes": 7516192768, "SwapTotal": 2147483648, "SwapUsed": 536870912 },
+  "Disk": { "MountPoint": "/", "TotalBytes": 494384795648, "UsedBytes": 214748364800, "FreeBytes": 279636430848 },
+  "Net": { "Interface": "en0", "IP": "192.168.1.10", "RxKBps": 18.4, "TxKBps": 2.1 },
+  "Thermal": { "TempC": 55.2, "ArmFreqMHz": 0, "GpuFreqMHz": 0, "Throttled": "" },
+  "Procs": [{ "Name": "chrome", "CPUPct": 22.1, "MemPct": 3.4 }, ...]
+}
+```
+
+## Project Layout
+
+```
+cmd/monitor/main.go          — entry point, flag parsing, theme loading
+internal/
+  collector/
+    darwin.go                — macOS: top, netstat, osx-cpu-temp, sysctl
+    linux.go                 — Linux: /proc/stat, /proc/meminfo, /sys/class/net
+    rpi.go                   — Raspberry Pi extras: vcgencmd, thermal zone
+    collector.go             — Collector interface
+  config/
+    config.go                — Config struct, Load(), Default(), DefaultConfigContent
+  model/
+    snapshot.go              — Snapshot, CPU, Mem, Disk, Net, Thermal, ProcInfo structs
+  renderer/
+    renderer.go              — Renderer interface, New(cfg, theme, box) factory
+    tui.go                   — TUI renderer: card layout, progress bars, color helpers
+    json.go                  — JSON renderer
+  theme/
+    theme.go                 — Theme struct, Color, BoxChars, Load(), ListBuiltin(), BoxStyle()
+    themes/*.toml            — Embedded built-in theme files
+```
+
+## Platform Requirements
+
+| Platform | Notes |
+|---|---|
+| macOS (Apple Silicon / Intel) | Temperature requires `brew install osx-cpu-temp` |
+| Linux x86_64 | No extra dependencies |
+| Raspberry Pi arm64 / armv7 | Full thermal via `vcgencmd` (Raspberry Pi OS) |
+
+## Common LLM Tasks
+
+**"Change the default theme"**: Edit `cfg.Theme` default in `internal/config/config.go` and `theme = "..."` in `DefaultConfigContent`.
+
+**"Add a new theme"**: Create `internal/theme/themes/<name>.toml` with the 10 RGB color sections shown above. The `//go:embed themes/*.toml` directive picks it up automatically at build time.
+
+**"Add a new card"**: Add a field to `internal/model/snapshot.go`, collect data in `darwin.go`/`linux.go`, implement `renderXxxCard()` in `tui.go`, add it to the `renderFull()` call sequence and the default `widgets` list in `config.go`.
+
+**"Add a new flag"**: Declare with `flag.String/Bool/Int` in `main.go` after `flag.Parse()`, override the corresponding `cfg` field, pass updated values to `renderer.New(cfg, t, bc)`.
+
+## References
+
+- Repository: https://github.com/denisfl/sumi
+- Issues: https://github.com/denisfl/sumi/issues
+- Releases: https://github.com/denisfl/sumi/releases
+- Author: https://bsky.app/profile/fedosov.me

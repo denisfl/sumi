@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"sumi/internal/model"
@@ -32,13 +33,28 @@ func (c *darwinCollector) Collect(ctx context.Context) (model.Snapshot, error) {
 		Procs:     []model.ProcEntry{},
 	}
 
-	s.CPU = collectCPU(ctx)
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.CPU = collectCPU(ctx)
+		s.Thermal.TempC = s.CPU.TempC
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.Net = collectNet(ctx)
+	}()
+
 	s.Mem = collectMem(ctx)
 	s.Disk = collectDisk(ctx)
-	s.Net = collectNet(ctx)
 	s.Procs = collectProcs(ctx)
 	s.Hostname, _ = os.Hostname()
 	s.Uptime = collectUptimeDarwin(ctx)
+
+	wg.Wait()
 
 	return s, nil
 }
@@ -60,9 +76,10 @@ func collectCPU(ctx context.Context) model.CPU {
 		cpu.Model = strings.TrimSpace(out)
 	}
 
-	// CPU usage: sample /dev/null via top -l 2 in non-interactive mode.
-	// top -l 2 -n 0 outputs two frames; we take CPU idle from the second.
-	if out, err := runCmd(ctx, "top", "-l", "2", "-n", "0", "-s", "1"); err == nil {
+	// CPU usage: two-sample delta via top -l 2 (runs in parallel with net collector).
+	// top -l 2 -n 0 outputs two frames with the default 1-second interval;
+	// we take CPU idle% from the second frame for accurate recent-usage delta.
+	if out, err := runCmd(ctx, "top", "-l", "2", "-n", "0"); err == nil {
 		idle := parseCPUIdleFromTop(out)
 		if idle >= 0 {
 			cpu.Usage = 100.0 - idle
@@ -70,14 +87,44 @@ func collectCPU(ctx context.Context) model.CPU {
 	}
 
 	// CPU temperature via osx-cpu-temp (optional third-party tool).
+	// Wrapped with a 2-second deadline so a hanging binary doesn't block Collect.
 	// Output is typically "28.8°C" or "CPU: 28.8°C".
-	if out, err := runCmd(ctx, "osx-cpu-temp"); err == nil {
+	tctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if out, err := runCmd(tctx, "osx-cpu-temp"); err == nil {
 		if t := parseDegreesC(out); t > 0 {
 			cpu.TempC = t
 		}
 	}
 
 	return cpu
+}
+
+// parseCPUIdleFromTop extracts idle% from the last "CPU usage:" line in top -l 2 output.
+// Format: "CPU usage: 6.66% user, 13.33% sys, 80.0% idle"
+func parseCPUIdleFromTop(out string) float64 {
+	var lastLine string
+	scanner := bufio.NewScanner(strings.NewReader(out))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "CPU usage:") {
+			lastLine = line
+		}
+	}
+	if lastLine == "" {
+		return -1
+	}
+	for _, part := range strings.Split(lastLine, ",") {
+		part = strings.TrimSpace(part)
+		if strings.HasSuffix(part, "% idle") {
+			s := strings.TrimSuffix(part, "% idle")
+			s = strings.TrimSpace(s)
+			if v, err := strconv.ParseFloat(s, 64); err == nil {
+				return v
+			}
+		}
+	}
+	return -1
 }
 
 // parseDegreesC extracts the first float preceding a '°' or 'C' character.
@@ -97,33 +144,6 @@ func parseDegreesC(s string) float64 {
 		}
 	}
 	return 0
-}
-
-// parseCPUIdleFromTop extracts idle% from the last "CPU usage:" line in top output.
-func parseCPUIdleFromTop(out string) float64 {
-	var lastLine string
-	scanner := bufio.NewScanner(strings.NewReader(out))
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "CPU usage:") {
-			lastLine = line
-		}
-	}
-	if lastLine == "" {
-		return -1
-	}
-	// Format: "CPU usage: 6.66% user, 13.33% sys, 80.0% idle"
-	for _, part := range strings.Split(lastLine, ",") {
-		part = strings.TrimSpace(part)
-		if strings.HasSuffix(part, "% idle") {
-			s := strings.TrimSuffix(part, "% idle")
-			s = strings.TrimSpace(s)
-			if v, err := strconv.ParseFloat(s, 64); err == nil {
-				return v
-			}
-		}
-	}
-	return -1
 }
 
 // collectMem parses vm_stat output and sysctl for macOS memory metrics.
@@ -262,7 +282,7 @@ func collectDisk(_ context.Context) model.Disk {
 }
 
 // collectNet samples rx/tx bytes on the primary interface over 1 second.
-func collectNet(_ context.Context) model.Net {
+func collectNet(ctx context.Context) model.Net {
 	n := model.Net{}
 
 	iface := primaryInterface()
@@ -288,9 +308,9 @@ func collectNet(_ context.Context) model.Net {
 		}
 	}
 
-	rx0, tx0 := netstatBytes(iface)
+	rx0, tx0 := netstatBytes(ctx, iface)
 	time.Sleep(1 * time.Second)
-	rx1, tx1 := netstatBytes(iface)
+	rx1, tx1 := netstatBytes(ctx, iface)
 
 	if rx1 >= rx0 {
 		n.RxKBps = float64(rx1-rx0) / 1024.0
@@ -346,9 +366,12 @@ func hasIPv4(i net.Interface) bool {
 }
 
 // netstatBytes extracts ibytes and obytes for iface via netstat -bI <iface>.
+// Uses ctx (with a 3-second deadline) so a hung netstat cannot block the collector.
 // netstat -bI output columns: Name Mtu Network Address Ipkts Ierrs Ibytes Opkts Oerrs Obytes Coll Drop
-func netstatBytes(iface string) (rx, tx uint64) {
-	out, err := runCmd(context.Background(), "netstat", "-bI", iface)
+func netstatBytes(ctx context.Context, iface string) (rx, tx uint64) {
+	nctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	out, err := runCmd(nctx, "netstat", "-bI", iface)
 	if err != nil {
 		return 0, 0
 	}

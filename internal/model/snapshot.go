@@ -23,10 +23,11 @@ type Thermal struct {
 
 // CPU holds CPU metrics.
 type CPU struct {
-	Usage  float64
-	Cores  int
-	Model  string
-	TempC  float64
+	Usage      float64
+	Cores      int
+	Model      string
+	TempC      float64
+	CoreUsages []float64 // per-core usage 0–100; nil if unavailable on this platform
 }
 
 // Mem holds memory metrics in bytes.

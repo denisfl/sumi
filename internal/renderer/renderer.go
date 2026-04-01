@@ -4,7 +4,9 @@ package renderer
 import (
 	"fmt"
 
+	"sumi/internal/config"
 	"sumi/internal/model"
+	"sumi/internal/theme"
 )
 
 // Renderer renders a system snapshot.
@@ -12,14 +14,14 @@ type Renderer interface {
 	Render(s model.Snapshot) error
 }
 
-// New returns a renderer by name. Supported: "tui", "json".
-func New(name string) (Renderer, error) {
-	switch name {
+// New returns a renderer configured from cfg, theme, and border style.
+func New(cfg config.Config, t theme.Theme, bc theme.BoxChars) (Renderer, error) {
+	switch cfg.Renderer {
 	case "tui":
-		return NewTUI(), nil
+		return NewTUI(cfg, t, bc), nil
 	case "json":
 		return NewJSON(), nil
 	default:
-		return nil, fmt.Errorf("unknown renderer %q: choose tui or json", name)
+		return nil, fmt.Errorf("unknown renderer %q: choose tui or json", cfg.Renderer)
 	}
 }

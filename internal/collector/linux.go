@@ -73,51 +73,85 @@ func linuxUptime() string {
 }
 
 // linuxCPU computes CPU usage by sampling /proc/stat twice over 1 second.
+// It also collects per-core usage via a 200ms delta (nested within the 1s window).
 func linuxCPU(ctx context.Context) model.CPU {
 	cpu := model.CPU{}
 
-	read := func() (idle, total uint64) {
+	type coreStats struct {
+		idle, total uint64
+	}
+
+	// readAll reads aggregate and per-core stats from /proc/stat.
+	readAll := func() (agg coreStats, cores []coreStats) {
 		data, err := os.ReadFile("/proc/stat")
 		if err != nil {
-			return 0, 0
+			return
 		}
 		scanner := bufio.NewScanner(bytes.NewReader(data))
 		for scanner.Scan() {
 			line := scanner.Text()
-			if !strings.HasPrefix(line, "cpu ") {
+			var isCPU bool
+			var isAggregate bool
+			if strings.HasPrefix(line, "cpu ") {
+				isCPU = true
+				isAggregate = true
+			} else if strings.HasPrefix(line, "cpu") {
+				isCPU = true
+			}
+			if !isCPU {
 				continue
 			}
 			fields := strings.Fields(line)
 			if len(fields) < 5 {
-				break
+				continue
 			}
-			// user nice system idle iowait irq softirq steal guest guest_nice
 			vals := make([]uint64, len(fields)-1)
 			for i, f := range fields[1:] {
 				vals[i], _ = strconv.ParseUint(f, 10, 64)
 			}
 			idleTime := vals[3]
 			if len(vals) > 4 {
-				idleTime += vals[4] // iowait counts as idle
+				idleTime += vals[4]
 			}
 			var sum uint64
 			for _, v := range vals {
 				sum += v
 			}
-			return idleTime, sum
+			st := coreStats{idle: idleTime, total: sum}
+			if isAggregate {
+				agg = st
+			} else {
+				cores = append(cores, st)
+			}
 		}
-		return 0, 0
+		return
 	}
 
-	idle0, total0 := read()
-	time.Sleep(1 * time.Second)
-	idle1, total1 := read()
+	agg0, cores0 := readAll()
+	time.Sleep(200 * time.Millisecond)
+	agg1, cores1 := readAll()
+	// Wait the remaining ~800ms for the full 1s aggregate sample
+	time.Sleep(800 * time.Millisecond)
+	agg2, _ := readAll()
 
-	deltTotal := total1 - total0
-	deltIdle := idle1 - idle0
-	if deltTotal > 0 {
-		cpu.Usage = (1.0 - float64(deltIdle)/float64(deltTotal)) * 100.0
+	dTotal := agg2.total - agg0.total
+	dIdle := agg2.idle - agg0.idle
+	if dTotal > 0 {
+		cpu.Usage = (1.0 - float64(dIdle)/float64(dTotal)) * 100.0
 	}
+
+	// Per-core usage from the 200ms window
+	if len(cores0) > 0 && len(cores1) == len(cores0) {
+		cpu.CoreUsages = make([]float64, len(cores0))
+		for i := range cores0 {
+			dt := cores1[i].total - cores0[i].total
+			di := cores1[i].idle - cores0[i].idle
+			if dt > 0 {
+				cpu.CoreUsages[i] = (1.0 - float64(di)/float64(dt)) * 100.0
+			}
+		}
+	}
+	_ = agg1 // silence unused variable warning
 
 	// Core count
 	if out, err := runCmd(ctx, "nproc"); err == nil {
