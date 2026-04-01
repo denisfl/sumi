@@ -68,6 +68,11 @@ func rpiThermal(ctx context.Context) model.Thermal {
 		}
 	}
 
+	// Populate Sensors from the readings above.
+	if t.TempC > 0 {
+		t.Sensors = append(t.Sensors, model.ThermalSensor{Name: "CPU", TempC: t.TempC})
+	}
+
 	return t
 }
 

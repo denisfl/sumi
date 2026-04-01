@@ -10,10 +10,17 @@ type ProcEntry struct {
 	MemPct float64
 }
 
+// ThermalSensor holds a named temperature reading.
+type ThermalSensor struct {
+	Name  string  `json:"Name"`
+	TempC float64 `json:"TempC"`
+}
+
 // Thermal holds temperature and frequency data, populated on Raspberry Pi
 // or from /sys/class/thermal on Linux.
 type Thermal struct {
-	TempC      float64
+	TempC      float64          // primary CPU temperature (kept for backward compat)
+	Sensors    []ThermalSensor  // named sensor list (CPU, GPU, SSD, etc.)
 	ArmFreqMHz int
 	GpuFreqMHz int
 	// Throttled is the raw hex string from vcgencmd get_throttled.

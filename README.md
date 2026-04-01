@@ -223,23 +223,34 @@ Once installed, the THERMAL card will show the real CPU temperature automaticall
 
 ### Optional: macOS temperature
 
-CPU temperature on macOS requires the `osx-cpu-temp` tool:
+CPU temperature on macOS requires an external tool:
+
+**Intel Macs** — install via Homebrew:
 
 ```bash
 brew install osx-cpu-temp
 ```
 
-Once installed, the THERMAL card will show the real CPU temperature automatically.
+**Apple Silicon (M1/M2/M3/M4)** — build `smctemp` from source:
+
+```bash
+git clone https://github.com/narugit/smctemp.git
+cd smctemp
+make
+sudo make install
+```
+
+sumi tries `osx-cpu-temp` first, then falls back to `smctemp` automatically. Once either tool is installed and on `$PATH`, the THERMAL card will display the real CPU temperature.
 
 ## Platforms
 
-| Platform              | CPU | Memory | Disk | Network | Thermal              |
-| --------------------- | --- | ------ | ---- | ------- | -------------------- |
-| macOS (Apple Silicon) | Yes | Yes    | Yes  | Yes     | via `osx-cpu-temp`   |
-| macOS (Intel)         | Yes | Yes    | Yes  | Yes     | via `osx-cpu-temp`   |
-| Linux x86_64          | Yes | Yes    | Yes  | Yes     | `/sys/class/thermal` |
-| Raspberry Pi (arm64)  | Yes | Yes    | Yes  | Yes     | Full (vcgencmd)      |
-| Raspberry Pi (armv7)  | Yes | Yes    | Yes  | Yes     | Full (vcgencmd)      |
+| Platform              | CPU | Memory | Disk | Network | Thermal                           |
+| --------------------- | --- | ------ | ---- | ------- | --------------------------------- |
+| macOS (Apple Silicon) | Yes | Yes    | Yes  | Yes     | via `smctemp` (build from source) |
+| macOS (Intel)         | Yes | Yes    | Yes  | Yes     | via `osx-cpu-temp` or `smctemp`   |
+| Linux x86_64          | Yes | Yes    | Yes  | Yes     | `/sys/class/thermal`              |
+| Raspberry Pi (arm64)  | Yes | Yes    | Yes  | Yes     | Full (vcgencmd)                   |
+| Raspberry Pi (armv7)  | Yes | Yes    | Yes  | Yes     | Full (vcgencmd)                   |
 
 ## License
 

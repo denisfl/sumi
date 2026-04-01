@@ -41,6 +41,7 @@ func (c *linuxCollector) Collect(ctx context.Context) (model.Snapshot, error) {
 	s.Net = linuxNet()
 	s.Procs = linuxProcs(ctx)
 	s.Thermal.TempC = linuxThermal()
+	s.Thermal.Sensors = linuxThermalSensors()
 	s.Hostname, _ = os.Hostname()
 	s.Uptime = linuxUptime()
 	return s, nil
@@ -328,6 +329,62 @@ func linuxProcs(ctx context.Context) []model.ProcEntry {
 		count++
 	}
 	return procs
+}
+
+// linuxThermalSensors reads all /sys/class/thermal/thermal_zone* entries and returns
+// named ThermalSensor values. Zone type names are mapped to friendly labels.
+func linuxThermalSensors() []model.ThermalSensor {
+	var sensors []model.ThermalSensor
+	entries, err := os.ReadDir("/sys/class/thermal")
+	if err != nil {
+		return sensors
+	}
+	seen := make(map[string]bool)
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, "thermal_zone") {
+			continue
+		}
+		base := filepath.Join("/sys/class/thermal", name)
+		tempData, err := os.ReadFile(filepath.Join(base, "temp"))
+		if err != nil || len(tempData) == 0 {
+			continue
+		}
+		n, err := strconv.ParseFloat(strings.TrimSpace(string(tempData)), 64)
+		if err != nil || n <= 0 {
+			continue
+		}
+		tempC := n / 1000.0
+		typeData, _ := os.ReadFile(filepath.Join(base, "type"))
+		zoneName := strings.TrimSpace(string(typeData))
+		if zoneName == "" {
+			zoneName = name
+		}
+		// Map common zone types to friendly display names.
+		label := zoneLabel(zoneName)
+		if seen[label] {
+			continue // deduplicate by label
+		}
+		seen[label] = true
+		sensors = append(sensors, model.ThermalSensor{Name: label, TempC: tempC})
+	}
+	return sensors
+}
+
+// zoneLabel maps a raw thermal_zone type string to a short display name.
+func zoneLabel(raw string) string {
+	l := strings.ToLower(raw)
+	switch {
+	case strings.Contains(l, "x86_pkg"), strings.Contains(l, "acpitz"),
+		strings.Contains(l, "cpu"), strings.Contains(l, "core"):
+		return "CPU"
+	case strings.Contains(l, "gpu"):
+		return "GPU"
+	case strings.Contains(l, "nvme"), strings.Contains(l, "ssd"):
+		return "SSD"
+	default:
+		return raw
+	}
 }
 
 // linuxThermal reads /sys/class/thermal/thermal_zone0/temp (millidegrees C).

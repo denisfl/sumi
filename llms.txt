@@ -168,7 +168,8 @@ internal/
 
 | Platform | Notes |
 |---|---|
-| macOS (Apple Silicon / Intel) | Temperature requires `brew install osx-cpu-temp` |
+| macOS (Apple Silicon) | Temperature requires building `smctemp` from source: https://github.com/narugit/smctemp |
+| macOS (Intel) | Temperature requires `brew install osx-cpu-temp` (or `smctemp`) |
 | Linux x86_64 | No extra dependencies |
 | Raspberry Pi arm64 / armv7 | Full thermal via `vcgencmd` (Raspberry Pi OS) |
 

@@ -168,11 +168,23 @@ return fmt.Sprintf(" %s%s%s  %s%s%s", r.tc.cyan, host, colReset, r.tc.green, upt
 }
 
 func (r *tuiRenderer) compactThermalLine(s model.Snapshot) string {
-if s.Thermal.TempC > 0 {
-return fmt.Sprintf(" %s%-4s%s %s%.1f\u00b0C%s",
-colDim, "temp", colReset, r.thermalColor(s.Thermal.TempC), s.Thermal.TempC, colReset)
-}
-return fmt.Sprintf(" %s%s%s", colDim, "no temp data", colReset)
+	if len(s.Thermal.Sensors) > 0 {
+		// Show CPU sensor primarily; fall back to first available.
+		for _, sensor := range s.Thermal.Sensors {
+			if sensor.Name == "CPU" {
+				return fmt.Sprintf(" %s%-4s%s %s%.1f\u00b0C%s",
+					colDim, "cpu", colReset, r.thermalColor(sensor.TempC), sensor.TempC, colReset)
+			}
+		}
+		first := s.Thermal.Sensors[0]
+		return fmt.Sprintf(" %s%-4s%s %s%.1f\u00b0C%s",
+			colDim, first.Name, colReset, r.thermalColor(first.TempC), first.TempC, colReset)
+	}
+	if s.Thermal.TempC > 0 {
+		return fmt.Sprintf(" %s%-4s%s %s%.1f\u00b0C%s",
+			colDim, "temp", colReset, r.thermalColor(s.Thermal.TempC), s.Thermal.TempC, colReset)
+	}
+	return fmt.Sprintf(" %s%s%s", colDim, "no temp data", colReset)
 }
 
 // ---- Layout helpers ----
@@ -320,41 +332,76 @@ return lines
 }
 
 func (r *tuiRenderer) renderThermalCard(s model.Snapshot, w int) []string {
-tempStr := "N/A"
-tempCol := r.tc.text
-if s.Thermal.TempC > 0 {
-tempStr = fmt.Sprintf("%.1f\u00b0C", s.Thermal.TempC)
-tempCol = r.thermalColor(s.Thermal.TempC)
-}
-lines := []string{r.cardTop("THERMAL", w), r.cardSep(w)}
-if s.Thermal.TempC > 0 {
-lines = append(lines, r.cardLine(fmt.Sprintf(" %s%-6s%s %s%s%s", colDim, "temp", colReset, tempCol, tempStr, colReset), w))
-} else {
-lines = append(lines, r.cardEmpty(w))
-}
-if s.Platform == "rpi" {
-armStr, gpuStr := "N/A", "N/A"
-if s.Thermal.ArmFreqMHz > 0 {
-armStr = fmt.Sprintf("%d MHz", s.Thermal.ArmFreqMHz)
-}
-if s.Thermal.GpuFreqMHz > 0 {
-gpuStr = fmt.Sprintf("%d MHz", s.Thermal.GpuFreqMHz)
-}
-thrStr, thrCol := "ok", r.tc.green
-if s.Thermal.Throttled != "" {
-thrStr = s.Thermal.Throttled
-thrCol = r.tc.red
-}
-lines = append(lines, r.cardLine(fmt.Sprintf(" %s%-6s%s %s%s%s", colDim, "arm", colReset, r.tc.orange, armStr, colReset), w))
-lines = append(lines, r.cardLine(fmt.Sprintf(" %s%-6s%s %s%s%s", colDim, "gpu", colReset, r.tc.purple, gpuStr, colReset), w))
-lines = append(lines, r.cardLine(fmt.Sprintf(" %s%-6s%s %s%s%s", colDim, "thrt", colReset, thrCol, thrStr, colReset), w))
-} else {
-lines = append(lines, r.cardEmpty(w))
-lines = append(lines, r.cardEmpty(w))
-lines = append(lines, r.cardEmpty(w))
-}
-lines = append(lines, r.cardBottom(w))
-return lines
+	lines := []string{r.cardTop("THERMAL", w), r.cardSep(w)}
+
+	if len(s.Thermal.Sensors) > 0 {
+		// Show up to 3 named sensor rows (CPU, GPU, SSD).
+		for i, sensor := range s.Thermal.Sensors {
+			if i >= 3 {
+				break
+			}
+			col := r.thermalColor(sensor.TempC)
+			line := fmt.Sprintf(" %s%-6s%s %s%.1f\u00b0C%s",
+				colDim, sensor.Name, colReset, col, sensor.TempC, colReset)
+			lines = append(lines, r.cardLine(line, w))
+		}
+		// Pad to consistent height (3 sensor rows).
+		for len(lines) < 5 {
+			lines = append(lines, r.cardEmpty(w))
+		}
+		if s.Platform == "rpi" {
+			thrStr, thrCol := "ok", r.tc.green
+			if s.Thermal.Throttled != "" {
+				thrStr = s.Thermal.Throttled
+				thrCol = r.tc.red
+			}
+			lines = append(lines, r.cardLine(fmt.Sprintf(" %s%-6s%s %s%s%s",
+				colDim, "thrt", colReset, thrCol, thrStr, colReset), w))
+		} else {
+			lines = append(lines, r.cardEmpty(w))
+		}
+	} else {
+		// Fallback: single TempC value.
+		tempStr := "N/A"
+		tempCol := r.tc.text
+		if s.Thermal.TempC > 0 {
+			tempStr = fmt.Sprintf("%.1f\u00b0C", s.Thermal.TempC)
+			tempCol = r.thermalColor(s.Thermal.TempC)
+		}
+		if s.Thermal.TempC > 0 {
+			lines = append(lines, r.cardLine(fmt.Sprintf(" %s%-6s%s %s%s%s",
+				colDim, "temp", colReset, tempCol, tempStr, colReset), w))
+		} else {
+			lines = append(lines, r.cardEmpty(w))
+		}
+		if s.Platform == "rpi" {
+			armStr, gpuStr := "N/A", "N/A"
+			if s.Thermal.ArmFreqMHz > 0 {
+				armStr = fmt.Sprintf("%d MHz", s.Thermal.ArmFreqMHz)
+			}
+			if s.Thermal.GpuFreqMHz > 0 {
+				gpuStr = fmt.Sprintf("%d MHz", s.Thermal.GpuFreqMHz)
+			}
+			thrStr, thrCol := "ok", r.tc.green
+			if s.Thermal.Throttled != "" {
+				thrStr = s.Thermal.Throttled
+				thrCol = r.tc.red
+			}
+			lines = append(lines, r.cardLine(fmt.Sprintf(" %s%-6s%s %s%s%s",
+				colDim, "arm", colReset, r.tc.orange, armStr, colReset), w))
+			lines = append(lines, r.cardLine(fmt.Sprintf(" %s%-6s%s %s%s%s",
+				colDim, "gpu", colReset, r.tc.purple, gpuStr, colReset), w))
+			lines = append(lines, r.cardLine(fmt.Sprintf(" %s%-6s%s %s%s%s",
+				colDim, "thrt", colReset, thrCol, thrStr, colReset), w))
+		} else {
+			lines = append(lines, r.cardEmpty(w))
+			lines = append(lines, r.cardEmpty(w))
+			lines = append(lines, r.cardEmpty(w))
+		}
+	}
+
+	lines = append(lines, r.cardBottom(w))
+	return lines
 }
 
 func (r *tuiRenderer) renderSystemCard(s model.Snapshot, w int) []string {

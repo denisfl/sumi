@@ -40,6 +40,7 @@ func (c *darwinCollector) Collect(ctx context.Context) (model.Snapshot, error) {
 		defer wg.Done()
 		s.CPU = collectCPU(ctx)
 		s.Thermal.TempC = s.CPU.TempC
+		s.Thermal.Sensors = darwinThermalSensors(ctx, s.CPU.TempC)
 	}()
 
 	wg.Add(1)
@@ -86,18 +87,98 @@ func collectCPU(ctx context.Context) model.CPU {
 		}
 	}
 
-	// CPU temperature via osx-cpu-temp (optional third-party tool).
-	// Wrapped with a 2-second deadline so a hanging binary doesn't block Collect.
-	// Output is typically "28.8°C" or "CPU: 28.8°C".
-	tctx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
+	// CPU temperature — try osx-cpu-temp (Intel) then smctemp (Intel + Apple Silicon).
+	// Each wrapped with a 2-second deadline to avoid hanging Collect.
+	// osx-cpu-temp output: "28.8°C" or "CPU: 28.8°C"
+	// smctemp output:      "CPU die temperature: 47.0 °C"
+	tctx, tcancel := context.WithTimeout(ctx, 2*time.Second)
+	defer tcancel()
 	if out, err := runCmd(tctx, "osx-cpu-temp"); err == nil {
 		if t := parseDegreesC(out); t > 0 {
 			cpu.TempC = t
 		}
 	}
+	if cpu.TempC == 0 {
+		tctx2, tcancel2 := context.WithTimeout(ctx, 2*time.Second)
+		defer tcancel2()
+		// smctemp -c prints only a plain float, e.g. "47.9"
+		if out, err := runCmd(tctx2, "smctemp", "-c"); err == nil {
+			if t, err2 := strconv.ParseFloat(strings.TrimSpace(out), 64); err2 == nil && t > 0 {
+				cpu.TempC = t
+			}
+		}
+	}
 
 	return cpu
+}
+
+// darwinThermalSensors builds the named sensor list: CPU, GPU (smctemp -g),
+// and SSD (smartctl without sudo — silently skipped if unavailable or auth fails).
+func darwinThermalSensors(ctx context.Context, cpuTempC float64) []model.ThermalSensor {
+	var sensors []model.ThermalSensor
+
+	if cpuTempC > 0 {
+		sensors = append(sensors, model.ThermalSensor{Name: "CPU", TempC: cpuTempC})
+	}
+
+	// GPU temperature via smctemp -g (Apple Silicon + Intel).
+	tctx, tcancel := context.WithTimeout(ctx, 2*time.Second)
+	defer tcancel()
+	if out, err := runCmd(tctx, "smctemp", "-g"); err == nil {
+		if t, err2 := strconv.ParseFloat(strings.TrimSpace(out), 64); err2 == nil && t > 0 {
+			sensors = append(sensors, model.ThermalSensor{Name: "GPU", TempC: t})
+		}
+	}
+
+	// SSD/NVMe temperature via smartctl (requires smartmontools; may need sudo — silently skip).
+	// Try /dev/disk0 first (primary internal NVMe on macOS).
+	diskTempC := darwinDiskTemp(ctx)
+	if diskTempC > 0 {
+		sensors = append(sensors, model.ThermalSensor{Name: "SSD", TempC: diskTempC})
+	}
+
+	return sensors
+}
+
+// darwinDiskTemp tries to read NVMe/SSD temperature via smartctl without root.
+// Returns 0 if unavailable or access is denied.
+func darwinDiskTemp(ctx context.Context) float64 {
+	tctx, tcancel := context.WithTimeout(ctx, 3*time.Second)
+	defer tcancel()
+	// --nocheck=standby avoids spinning up sleeping drives.
+	out, err := runCmd(tctx, "smartctl", "-A", "/dev/disk0", "--nocheck=standby")
+	if err != nil {
+		return 0
+	}
+	return parseSmartctlTemp(out)
+}
+
+// parseSmartctlTemp extracts temperature from smartctl -A output.
+// Handles SATA ("Temperature_Celsius" column) and NVMe ("Temperature:" line) formats.
+func parseSmartctlTemp(out string) float64 {
+	scanner := bufio.NewScanner(strings.NewReader(out))
+	for scanner.Scan() {
+		line := scanner.Text()
+		// NVMe format: "Temperature:                        34 Celsius"
+		if strings.HasPrefix(line, "Temperature:") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				if t, err := strconv.ParseFloat(fields[1], 64); err == nil && t > 0 {
+					return t
+				}
+			}
+		}
+		// SATA format: "190 Airflow_Temperature_Cel ... 27" (value is last field)
+		if strings.Contains(line, "Temperature_Celsius") || strings.Contains(line, "Temperature_Cel") {
+			fields := strings.Fields(line)
+			if len(fields) >= 10 {
+				if t, err := strconv.ParseFloat(fields[len(fields)-1], 64); err == nil && t > 0 {
+					return t
+				}
+			}
+		}
+	}
+	return 0
 }
 
 // parseCPUIdleFromTop extracts idle% from the last "CPU usage:" line in top -l 2 output.
@@ -127,17 +208,22 @@ func parseCPUIdleFromTop(out string) float64 {
 	return -1
 }
 
-// parseDegreesC extracts the first float preceding a '°' or 'C' character.
+// parseDegreesC extracts the first float before a '°' or 'C' character.
+// Handles formats: "28.8°C", "CPU: 28.8°C", "CPU die temperature : 45.55 °C".
 func parseDegreesC(s string) float64 {
-	// Find the index of '°' or 'C' and try to parse the number before it.
 	for i, ch := range s {
 		if ch == '°' || (ch == 'C' && i > 0) {
-			// Walk back to start of the number
+			// Skip spaces between number and degree symbol.
 			j := i - 1
+			for j >= 0 && s[j] == ' ' {
+				j--
+			}
+			// Walk back through the numeric part.
+			end := j + 1
 			for j >= 0 && (s[j] == '.' || (s[j] >= '0' && s[j] <= '9')) {
 				j--
 			}
-			numStr := strings.TrimSpace(s[j+1 : i])
+			numStr := strings.TrimSpace(s[j+1 : end])
 			if v, err := strconv.ParseFloat(numStr, 64); err == nil {
 				return v
 			}
