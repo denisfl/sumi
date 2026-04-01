@@ -5,10 +5,11 @@ import "time"
 
 // ProcEntry holds a single process entry for the top-processes list.
 type ProcEntry struct {
-	Name   string
-	PID    int
-	CPUPct float64
-	MemPct float64
+	Name      string
+	PID       int
+	CPUPct    float64
+	MemPct    float64
+	Container string // "docker", "k8s", or "" for bare-metal processes
 }
 
 // ThermalSensor holds a named temperature reading.
@@ -85,18 +86,39 @@ type History struct {
 	NetTxSpark string // Tx throughput history (orange)
 }
 
+// BatteryInfo holds battery status. Nil when no battery is detected.
+type BatteryInfo struct {
+	ChargePct float64 // current charge 0–100
+	Charging  bool    // true when plugged in and charging
+	TimeLeft  string  // human-readable time remaining ("2h 15m", "Charged", etc.)
+}
+
+// ProcDetail holds extended per-process info shown in the detail panel.
+type ProcDetail struct {
+	PID       int
+	Name      string
+	PPID      int
+	Threads   int
+	FDs       int    // open file-descriptor count
+	Cwd       string // current working directory
+	StartTime string // human-readable process start time
+	CPUSpark  string // sparkline of recent CPU usage (from history ring)
+	MemSpark  string // sparkline of recent Mem usage (from history ring)
+}
+
 // Snapshot is the complete point-in-time view of system metrics.
 // Any field that could not be collected is left at its zero value.
 type Snapshot struct {
 	CPU       CPU
 	Mem       Mem
-	Disks     []DiskInfo // all mounted filesystems (virtual FSes excluded)
+	Disks     []DiskInfo   // all mounted filesystems (virtual FSes excluded)
 	Net       Net
 	Procs     []ProcEntry
 	Thermal   Thermal
-	GPU       *GPUInfo   // nil when no GPU tool is available
-	History   History    // sparkline strings; empty in single-shot mode
-	Platform  string // "linux", "darwin", or "rpi"
+	GPU       *GPUInfo     // nil when no GPU tool is available
+	Battery   *BatteryInfo // nil when no battery is present
+	History   History      // sparkline strings; empty in single-shot mode
+	Platform  string       // "linux", "darwin", or "rpi"
 	Hostname  string
 	Uptime    string // human-readable uptime string
 	Timestamp time.Time

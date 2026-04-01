@@ -74,6 +74,7 @@ func (c *darwinCollector) Collect(ctx context.Context) (model.Snapshot, error) {
 	s.Disks = collectDisks(ctx)
 	c.applyDiskIO(ctx, s.Disks)
 	s.Procs = collectProcs(ctx)
+	s.Battery = collectBatteryDarwin(ctx)
 	s.Hostname, _ = os.Hostname()
 	s.Uptime = collectUptimeDarwin(ctx)
 
@@ -761,6 +762,81 @@ func fmtDuration(d time.Duration) string {
 		return fmt.Sprintf("%dd %02d:%02d:%02d", days, h, m, s)
 	}
 	return fmt.Sprintf("%02d:%02d:%02d", h, m, s)
+}
+
+// collectBatteryDarwin reads battery status via pmset -g batt.
+// Returns nil when no battery is present (desktop Mac).
+// pmset -g batt output example:
+//
+//	Now drawing from 'Battery Power'
+//	-InternalBattery-0 (id=4653155);	87%; discharging; 2:14 remaining present: true
+func collectBatteryDarwin(ctx context.Context) *model.BatteryInfo {
+	tctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	out, err := runCmd(tctx, "pmset", "-g", "batt")
+	if err != nil {
+		return nil
+	}
+	return parsePmsetBatt(out)
+}
+
+// parsePmsetBatt parses pmset -g batt output into BatteryInfo.
+func parsePmsetBatt(out string) *model.BatteryInfo {
+	scanner := bufio.NewScanner(strings.NewReader(out))
+	for scanner.Scan() {
+		line := scanner.Text()
+		// Look for the battery data line containing a percentage.
+		if !strings.Contains(line, "InternalBattery") && !strings.Contains(line, "id=") {
+			continue
+		}
+		// e.g. "-InternalBattery-0 (id=4653155);	87%; discharging; 2:14 remaining present: true"
+		b := &model.BatteryInfo{}
+		// Parse charge percentage
+		for _, field := range strings.Fields(line) {
+			field = strings.Trim(field, ";")
+			if strings.HasSuffix(field, "%") {
+				pct, err := strconv.ParseFloat(strings.TrimSuffix(field, "%"), 64)
+				if err == nil {
+					b.ChargePct = pct
+				}
+			}
+		}
+		if b.ChargePct == 0 {
+			return nil // no battery data parsed
+		}
+		// Charging state: "charging", "discharging", "charged", "finishing charge"
+		if strings.Contains(line, "charging") && !strings.Contains(line, "discharging") {
+			b.Charging = true
+		}
+		// Time remaining: "2:14 remaining" or "charged" / "not charging"
+		if b.Charging || b.ChargePct >= 99 {
+			b.TimeLeft = "Charging"
+			if b.ChargePct >= 99 {
+				b.TimeLeft = "Charged"
+			}
+		} else {
+			// Find "H:MM remaining" pattern
+			parts := strings.Fields(line)
+			for i, p := range parts {
+				if p == "remaining" && i > 0 {
+					hm := strings.Trim(parts[i-1], ";")
+					// Convert H:MM to human form
+					if hh := strings.Split(hm, ":"); len(hh) == 2 {
+						h, _ := strconv.Atoi(hh[0])
+						m, _ := strconv.Atoi(hh[1])
+						if h > 0 {
+							b.TimeLeft = fmt.Sprintf("%dh %dm", h, m)
+						} else {
+							b.TimeLeft = fmt.Sprintf("%dm", m)
+						}
+					}
+					break
+				}
+			}
+		}
+		return b
+	}
+	return nil
 }
 
 // runCmd executes a command and returns its combined output as a string.

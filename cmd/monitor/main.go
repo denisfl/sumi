@@ -150,6 +150,12 @@ func main() {
 		}
 	}
 	selectedProc := 0 // j/k navigation index in proc table (-1 = no selection)
+	detailPID := 0    // PID currently shown in detail panel; 0 = none
+
+	// Per-PID CPU/Mem history rings (task 23).
+	const pidRingCap = 60
+	pidCPURings := make(map[int]*history.Ring)
+	pidMemRings := make(map[int]*history.Ring)
 
 	// killConfirm holds a pending kill request.
 	// When non-nil, we show a confirmation line and wait for 'y'/'n'.
@@ -240,6 +246,14 @@ func main() {
 			} else {
 				activeSort = "cpu"
 			}
+		case 'd', 'D':
+			if detailPID != 0 {
+				detailPID = 0 // toggle off
+			} else if selectedProc >= 0 && selectedProc < len(lastSnap.Procs) {
+				detailPID = lastSnap.Procs[selectedProc].PID
+			}
+		case 27: // Esc — close detail panel
+			detailPID = 0
 		case 13: // Enter
 			if selectedProc >= 0 && selectedProc < len(lastSnap.Procs) {
 				p := lastSnap.Procs[selectedProc]
@@ -253,8 +267,32 @@ func main() {
 
 	doRender := func(snap model.Snapshot) {
 		lastSnap = snap
+		// Update per-PID rings (task 23).
+		for _, p := range snap.Procs {
+			if _, ok := pidCPURings[p.PID]; !ok {
+				pidCPURings[p.PID] = history.NewRing(pidRingCap)
+				pidMemRings[p.PID] = history.NewRing(pidRingCap)
+			}
+			pidCPURings[p.PID].Push(p.CPUPct)
+			pidMemRings[p.PID].Push(p.MemPct)
+		}
 		if err := rdr.Render(snap); err != nil {
 			fmt.Fprintf(os.Stderr, "render error: %v\n", err)
+		}
+		// Detail panel (tasks 24/25): validate detailPID still alive.
+		if detailPID != 0 {
+			det := collector.ReadProcDetail(detailPID)
+			if det == nil {
+				detailPID = 0 // process gone
+			} else {
+				if cr, ok := pidCPURings[detailPID]; ok {
+					det.CPUSpark = cr.Sparkline(30)
+				}
+				if mr, ok := pidMemRings[detailPID]; ok {
+					det.MemSpark = mr.Sparkline(30)
+				}
+				renderer.RenderDetailPanel(*det)
+			}
 		}
 	}
 

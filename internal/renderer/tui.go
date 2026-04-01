@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -146,9 +147,62 @@ func (r *tuiRenderer) renderFull(s model.Snapshot, width int) error {
 	printRow(r.renderNetCard(s, narrow), r.renderProcsCard(s, wide))
 	fmt.Fprint(os.Stdout, "\r\n")
 
+	// Battery card (full width, optional)
+	if s.Battery != nil {
+		printCard(r.renderBatteryCard(s, width))
+		fmt.Fprint(os.Stdout, "\r\n")
+	}
+
 	// Row 4: System (full width)
 	printCard(r.renderSystemCard(s, width))
 	return nil
+}
+
+// RenderDetailPanel prints a process detail overlay panel to stdout.
+// It is designed to be called after Render() to append the panel below the main view.
+func RenderDetailPanel(det model.ProcDetail) {
+	w := terminalWidth()
+	if w < 40 {
+		w = 80
+	}
+	inner := w - 2
+
+	top := "\x1b[2m╭" + strings.Repeat("─", inner) + "╮\x1b[0m"
+	bot := "\x1b[2m╰" + strings.Repeat("─", inner) + "╯\x1b[0m"
+	sep := "\x1b[2m├" + strings.Repeat("─", inner) + "┤\x1b[0m"
+	line := func(content string) string {
+		vis := visibleLen(content)
+		if vis < inner {
+			content += strings.Repeat(" ", inner-vis)
+		}
+		return fmt.Sprintf("\x1b[2m│\x1b[0m%s\x1b[2m│\x1b[0m", content)
+	}
+
+	title := fmt.Sprintf(" \x1b[36mProcess Detail\x1b[0m  \x1b[2m[d] close\x1b[0m")
+	fmt.Fprint(os.Stdout, top+"\r\n")
+	fmt.Fprint(os.Stdout, line(title)+"\r\n")
+	fmt.Fprint(os.Stdout, sep+"\r\n")
+
+	row := func(label, val string) {
+		content := fmt.Sprintf(" \x1b[2m%-12s\x1b[0m \x1b[36m%s\x1b[0m", label, val)
+		fmt.Fprint(os.Stdout, line(content)+"\r\n")
+	}
+
+	row("pid", strconv.Itoa(det.PID))
+	row("name", det.Name)
+	row("ppid", strconv.Itoa(det.PPID))
+	row("threads", strconv.Itoa(det.Threads))
+	row("open fds", strconv.Itoa(det.FDs))
+	row("cwd", det.Cwd)
+	row("started", det.StartTime)
+	if det.CPUSpark != "" {
+		row("cpu history", "\x1b[32m"+det.CPUSpark+"\x1b[0m")
+	}
+	if det.MemSpark != "" {
+		row("mem history", "\x1b[33m"+det.MemSpark+"\x1b[0m")
+	}
+
+	fmt.Fprint(os.Stdout, bot+"\r\n")
 }
 
 func (r *tuiRenderer) renderCompact(s model.Snapshot, width int) error {
@@ -481,11 +535,20 @@ lines = append(lines, r.cardLine(fmt.Sprintf("%sN/A%s", colDim, colReset), w))
 }
 for _, p := range s.Procs {
 name := p.Name
-if len(name) > 20 {
-name = name[:19] + "\u2026"
+badge := ""
+switch p.Container {
+case "docker":
+	badge = "[d] "
+case "k8s":
+	badge = "[k] "
 }
+maxName := 20 - len(badge)
+if len(name) > maxName {
+	name = name[:maxName-1] + "\u2026"
+}
+displayName := badge + name
 row := fmt.Sprintf("%-20s %s%6.1f%s %s%6.1f%s",
-name, r.pctColor(p.CPUPct), p.CPUPct, colReset,
+displayName, r.pctColor(p.CPUPct), p.CPUPct, colReset,
 r.tc.teal, p.MemPct, colReset)
 lines = append(lines, r.cardLine(row, w))
 }
@@ -607,6 +670,41 @@ func (r *tuiRenderer) renderGPUCard(s model.Snapshot, w int) []string {
 	} else {
 		lines = append(lines, r.cardEmpty(w))
 	}
+	lines = append(lines, r.cardBottom(w))
+	return lines
+}
+
+func (r *tuiRenderer) renderBatteryCard(s model.Snapshot, w int) []string {
+	b := s.Battery
+	lines := []string{r.cardTop("Battery", w), r.cardSep(w)}
+	if b == nil {
+		lines = append(lines, r.cardEmpty(w))
+		lines = append(lines, r.cardBottom(w))
+		return lines
+	}
+
+	// Headline: percentage + status
+	status := "Discharging"
+	if b.Charging {
+		status = "Charging"
+	}
+	headline := fmt.Sprintf(" %s%.0f%%%s  %s%s%s",
+		r.pctColorInv(b.ChargePct), b.ChargePct, colReset,
+		r.tc.text, status, colReset)
+	if b.TimeLeft != "" {
+		headline = fmt.Sprintf(" %s%.0f%%%s  %s%s%s  %s%s%s",
+			r.pctColorInv(b.ChargePct), b.ChargePct, colReset,
+			r.tc.text, status, colReset,
+			colDim, b.TimeLeft, colReset)
+	}
+	lines = append(lines, r.cardLine(headline, w))
+
+	// Progress bar
+	barW := w - 4
+	if barW < 2 {
+		barW = 2
+	}
+	lines = append(lines, r.cardLine(" "+r.progressBar(b.ChargePct/100.0, barW), w))
 	lines = append(lines, r.cardBottom(w))
 	return lines
 }
@@ -745,6 +843,18 @@ return r.tc.yellow
 default:
 return r.tc.green
 }
+}
+
+// pctColorInv returns color for values where high is good (e.g. battery charge).
+func (r *tuiRenderer) pctColorInv(pct float64) string {
+	switch {
+	case pct <= 15.0:
+		return r.tc.red
+	case pct <= 30.0:
+		return r.tc.yellow
+	default:
+		return r.tc.green
+	}
 }
 
 func (r *tuiRenderer) thermalColor(temp float64) string {

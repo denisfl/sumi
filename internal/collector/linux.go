@@ -54,6 +54,7 @@ func (c *linuxCollector) Collect(ctx context.Context) (model.Snapshot, error) {
 	s.Procs = linuxProcs(ctx)
 	s.Thermal.TempC = linuxThermal()
 	s.Thermal.Sensors = linuxThermalSensors()
+	s.Battery = linuxBattery()
 	s.Hostname, _ = os.Hostname()
 	s.Uptime = linuxUptime()
 	// GPU: try Nvidia, then AMD.
@@ -320,10 +321,28 @@ func linuxProcs(ctx context.Context) []model.ProcEntry {
 		if idx := strings.LastIndex(name, "/"); idx >= 0 {
 			name = name[idx+1:]
 		}
-		procs = append(procs, model.ProcEntry{Name: name, PID: pid, CPUPct: cpuPct, MemPct: memPct})
+		container := procContainer(pid)
+		procs = append(procs, model.ProcEntry{Name: name, PID: pid, CPUPct: cpuPct, MemPct: memPct, Container: container})
 		count++
 	}
 	return procs
+}
+
+// procContainer reads /proc/PID/cgroup and returns "docker", "k8s", or "".
+func procContainer(pid int) string {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.Contains(line, "docker-") || strings.Contains(line, "/docker/") {
+			return "docker"
+		}
+		if strings.Contains(line, "kubepods") {
+			return "k8s"
+		}
+	}
+	return ""
 }
 
 // applyDiskIO reads /proc/diskstats, diffs against the previous sample, and
@@ -643,6 +662,86 @@ func linuxThermal() float64 {
 		return 0
 	}
 	return n / 1000.0
+}
+
+// linuxBattery reads /sys/class/power_supply/ and returns battery status.
+// Returns nil when no battery is present.
+func linuxBattery() *model.BatteryInfo {
+	// Look for BAT0, BAT1, or any entry with type "Battery".
+	entries, err := os.ReadDir("/sys/class/power_supply")
+	if err != nil {
+		return nil
+	}
+	for _, e := range entries {
+		dir := "/sys/class/power_supply/" + e.Name()
+		// Check type == "Battery"
+		typData, err := os.ReadFile(dir + "/type")
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(string(typData)) != "Battery" {
+			continue
+		}
+		b := &model.BatteryInfo{}
+		// Charge percentage: try capacity first, then energy_now/energy_full
+		if cap, err := readSysInt(dir + "/capacity"); err == nil {
+			b.ChargePct = float64(cap)
+		} else if now, nerr := readSysUint(dir + "/energy_now"); nerr == nil {
+			if full, ferr := readSysUint(dir + "/energy_full"); ferr == nil && full > 0 {
+				b.ChargePct = float64(now) / float64(full) * 100.0
+			}
+		}
+		if b.ChargePct == 0 {
+			continue
+		}
+		// Status: "Charging", "Discharging", "Full", "Not charging"
+		if status, err := os.ReadFile(dir + "/status"); err == nil {
+			st := strings.TrimSpace(string(status))
+			switch st {
+			case "Charging":
+				b.Charging = true
+				b.TimeLeft = "Charging"
+			case "Full":
+				b.TimeLeft = "Charged"
+			case "Discharging":
+				// Try to compute time remaining from current_now + charge_now
+				if currentUA, err := readSysUint(dir + "/current_now"); err == nil && currentUA > 0 {
+					if chargeUAh, err := readSysUint(dir + "/charge_now"); err == nil {
+						hours := float64(chargeUAh) / float64(currentUA)
+						h := int(hours)
+						m := int((hours - float64(h)) * 60)
+						if h > 0 {
+							b.TimeLeft = fmt.Sprintf("%dh %dm", h, m)
+						} else {
+							b.TimeLeft = fmt.Sprintf("%dm", m)
+						}
+					}
+				}
+			default:
+				b.TimeLeft = st
+			}
+		}
+		return b
+	}
+	return nil
+}
+
+// readSysInt reads a sysfs file as an integer.
+func readSysInt(path string) (int, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(strings.TrimSpace(string(data)))
+}
+
+// readSysUint reads a sysfs file as a uint64.
+func readSysUint(path string) (uint64, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
 }
 
 // runCmd executes a command and returns stdout+stderr as a string.
