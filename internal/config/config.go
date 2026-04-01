@@ -9,6 +9,16 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+// Alerts holds configurable alert thresholds.
+// A zero value means the alert is disabled.
+type Alerts struct {
+	CPUThreshold  float64 `toml:"cpu_threshold"`  // e.g. 90.0 = alert when CPU > 90%
+	MemThreshold  float64 `toml:"mem_threshold"`  // e.g. 90.0 = alert when MEM > 90%
+	DiskThreshold float64 `toml:"disk_threshold"` // e.g. 90.0 = alert when any disk > 90%
+	TempThreshold float64 `toml:"temp_threshold"` // e.g. 80.0 = alert when CPU temp > 80°C
+	Sound         bool    `toml:"sound"`          // emit \a bell when an alert is active
+}
+
 // Config holds all sumi runtime configuration.
 // CLI flags override config file values.
 type Config struct {
@@ -18,6 +28,7 @@ type Config struct {
 	BorderStyle string   `toml:"border_style"` // "rounded" | "sharp" | "double" | "bold", default "rounded"
 	CompactMode bool     `toml:"compact_mode"` // default false
 	Widgets     []string `toml:"widgets"`      // card order, default all
+	Alerts      Alerts   `toml:"alerts"`       // configurable alert thresholds
 }
 
 // Default returns the default configuration.
@@ -106,4 +117,16 @@ compact_mode = false
 
 # Card order (remove a name to hide that card)
 widgets = ["thermal", "cpu", "memory", "disk", "network", "processes", "system"]
+
+[alerts]
+# Alert when CPU usage exceeds threshold (0 = disabled)
+cpu_threshold = 0.0
+# Alert when memory usage exceeds threshold (0 = disabled)
+mem_threshold = 0.0
+# Alert when any disk usage exceeds threshold (0 = disabled)
+disk_threshold = 0.0
+# Alert when CPU temperature exceeds threshold in °C (0 = disabled)
+temp_threshold = 0.0
+# Emit terminal bell (\a) when an alert is active
+sound = false
 `

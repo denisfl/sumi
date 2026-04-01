@@ -6,13 +6,18 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"syscall"
 	"time"
 
+	"golang.org/x/term"
+
 	"sumi/internal/collector"
 	"sumi/internal/config"
+	"sumi/internal/history"
+	"sumi/internal/model"
 	"sumi/internal/renderer"
 	"sumi/internal/theme"
 )
@@ -87,8 +92,13 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Spark rings — kept in watch mode; empty in single-shot mode.
+	const ringCap = 120
+	cpuRing := history.NewRing(ringCap)
+	memRing := history.NewRing(ringCap)
+
 	if !*watch {
-		runOnce(ctx, col, rdr)
+		runOnce(ctx, col, rdr, cpuRing, memRing, nil)
 		return
 	}
 
@@ -108,24 +118,159 @@ func main() {
 	ticker := time.NewTicker(time.Duration(*interval) * time.Second)
 	defer ticker.Stop()
 
-	runOnce(ctx, col, rdr)
+	// -- Interactive keyboard setup --
+	// Mutable renderer state (theme, compact, sort column).
+	activeThemeName := *themeName
+	activeCompact := *compact
+	activeSort := "cpu" // "cpu" or "mem"
+	themes := theme.ListBuiltin()
+	themeIdx := 0
+	for i, tn := range themes {
+		if tn == activeThemeName {
+			themeIdx = i
+			break
+		}
+	}
+	selectedProc := 0 // j/k navigation index in proc table (-1 = no selection)
+
+	// killConfirm holds a pending kill request.
+	// When non-nil, we show a confirmation line and wait for 'y'/'n'.
+	type killReq struct {
+		name string
+		pid  int
+	}
+	var pendingKill *killReq
+
+	rebuildRenderer := func() {
+		t, err := theme.Load(activeThemeName)
+		if err != nil {
+			return
+		}
+		bc := theme.BoxStyle(*borderStyle)
+		cfg.CompactMode = activeCompact
+		rdr, err = renderer.New(cfg, t, bc)
+		if err != nil {
+			return
+		}
+	}
+
+	// Enable raw terminal if stdin is a tty.
+	var oldState *term.State
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		oldState, _ = term.MakeRaw(int(os.Stdin.Fd()))
+		defer func() {
+			if oldState != nil {
+				_ = term.Restore(int(os.Stdin.Fd()), oldState)
+			}
+		}()
+	}
+
+	keyCh := make(chan rune, 8)
+	if oldState != nil {
+		go func() {
+			buf := make([]byte, 4)
+			for {
+				n, err := os.Stdin.Read(buf)
+				if err != nil || n == 0 {
+					return
+				}
+				keyCh <- rune(buf[0])
+			}
+		}()
+	}
+
+	// lastSnap is stored to reference proc list for kill confirmations.
+	var lastSnap model.Snapshot
+
+	handleKey := func(ch rune) {
+		if pendingKill != nil {
+			switch ch {
+			case 'y', 'Y':
+				if pendingKill.pid > 0 {
+					_ = exec.Command("kill", "-TERM", fmt.Sprintf("%d", pendingKill.pid)).Run()
+				}
+			}
+			pendingKill = nil
+			return
+		}
+		switch ch {
+		case 'q', 'Q', 3: // 3 = Ctrl+C
+			if oldState != nil {
+				_ = term.Restore(int(os.Stdin.Fd()), oldState)
+			}
+			renderer.ShowCursor()
+			cancel()
+			os.Exit(0)
+		case 'v', 'V':
+			activeCompact = !activeCompact
+			rebuildRenderer()
+		case 't', 'T':
+			themeIdx = (themeIdx + 1) % len(themes)
+			activeThemeName = themes[themeIdx]
+			rebuildRenderer()
+		case 'j', 'J':
+			if selectedProc < len(lastSnap.Procs)-1 {
+				selectedProc++
+			}
+		case 'k', 'K':
+			if selectedProc > 0 {
+				selectedProc--
+			}
+		case 's', 'S':
+			if activeSort == "cpu" {
+				activeSort = "mem"
+			} else {
+				activeSort = "cpu"
+			}
+		case 13: // Enter
+			if selectedProc >= 0 && selectedProc < len(lastSnap.Procs) {
+				p := lastSnap.Procs[selectedProc]
+				pendingKill = &killReq{name: p.Name, pid: p.PID}
+				// Print confirmation prompt at bottom.
+				fmt.Fprintf(os.Stderr, "\r\nkill %s (PID %d)? [y/N] ", p.Name, p.PID)
+				return
+			}
+		}
+	}
+
+	doRender := func(snap model.Snapshot) {
+		lastSnap = snap
+		if err := rdr.Render(snap); err != nil {
+			fmt.Fprintf(os.Stderr, "render error: %v\n", err)
+		}
+	}
+
+	runOnce(ctx, col, rdr, cpuRing, memRing, doRender)
 	for {
 		select {
 		case <-ticker.C:
-			runOnce(ctx, col, rdr)
+			runOnce(ctx, col, rdr, cpuRing, memRing, doRender)
+		case ch := <-keyCh:
+			handleKey(ch)
 		case <-ctx.Done():
 			return
 		}
 	}
 }
 
-func runOnce(ctx context.Context, col collector.Collector, rdr renderer.Renderer) {
+func runOnce(ctx context.Context, col collector.Collector, rdr renderer.Renderer,
+	cpuRing, memRing *history.Ring, renderFn func(model.Snapshot)) {
 	snap, err := col.Collect(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "collect error: %v\n", err)
 		return
 	}
-	if err := rdr.Render(snap); err != nil {
+	cpuRing.Push(snap.CPU.Usage)
+	if snap.Mem.TotalBytes > 0 {
+		memRing.Push(float64(snap.Mem.UsedBytes) / float64(snap.Mem.TotalBytes) * 100.0)
+	}
+	const sparkWidth = 30
+	snap.History.CPUSpark = cpuRing.Sparkline(sparkWidth)
+	snap.History.MemSpark = memRing.Sparkline(sparkWidth)
+
+	if renderFn != nil {
+		renderFn(snap)
+	} else if err := rdr.Render(snap); err != nil {
 		fmt.Fprintf(os.Stderr, "render error: %v\n", err)
 	}
 }

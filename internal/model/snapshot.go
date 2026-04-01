@@ -6,6 +6,7 @@ import "time"
 // ProcEntry holds a single process entry for the top-processes list.
 type ProcEntry struct {
 	Name   string
+	PID    int
 	CPUPct float64
 	MemPct float64
 }
@@ -46,12 +47,23 @@ type Mem struct {
 	SwapTotal  uint64
 }
 
-// Disk holds disk usage metrics in bytes.
-type Disk struct {
+// DiskInfo holds disk usage metrics in bytes for a single mount point.
+type DiskInfo struct {
 	UsedBytes  uint64
 	TotalBytes uint64
 	FreeBytes  uint64
 	MountPoint string
+	FSType     string
+}
+
+// GPUInfo holds GPU metrics. Nil when no supported GPU tool is available.
+type GPUInfo struct {
+	Name         string
+	Driver       string  // "nvidia", "amd", "apple"
+	UsagePct     float64
+	TempC        float64
+	VRAMUsedMiB  uint64
+	VRAMTotalMiB uint64
 }
 
 // Net holds network interface metrics.
@@ -62,15 +74,24 @@ type Net struct {
 	TxKBps    float64
 }
 
+// History holds pre-computed sparkline strings for the TUI renderer.
+// Empty when running in single-shot mode.
+type History struct {
+	CPUSpark string
+	MemSpark string
+}
+
 // Snapshot is the complete point-in-time view of system metrics.
 // Any field that could not be collected is left at its zero value.
 type Snapshot struct {
 	CPU       CPU
 	Mem       Mem
-	Disk      Disk
+	Disks     []DiskInfo // all mounted filesystems (virtual FSes excluded)
 	Net       Net
 	Procs     []ProcEntry
 	Thermal   Thermal
+	GPU       *GPUInfo   // nil when no GPU tool is available
+	History   History    // sparkline strings; empty in single-shot mode
 	Platform  string // "linux", "darwin", or "rpi"
 	Hostname  string
 	Uptime    string // human-readable uptime string

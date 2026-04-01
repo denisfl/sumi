@@ -49,8 +49,19 @@ func (c *darwinCollector) Collect(ctx context.Context) (model.Snapshot, error) {
 		s.Net = collectNet(ctx)
 	}()
 
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		// Try Nvidia first, then Apple Silicon.
+		if gpu := collectNvidiaGPU(ctx); gpu != nil {
+			s.GPU = gpu
+		} else if gpu := collectAppleGPU(ctx); gpu != nil {
+			s.GPU = gpu
+		}
+	}()
+
 	s.Mem = collectMem(ctx)
-	s.Disk = collectDisk(ctx)
+	s.Disks = collectDisks(ctx)
 	s.Procs = collectProcs(ctx)
 	s.Hostname, _ = os.Hostname()
 	s.Uptime = collectUptimeDarwin(ctx)
@@ -340,31 +351,68 @@ func parseSizeToBytes(s string) uint64 {
 	return uint64(v)
 }
 
-// collectDisk reads df output for the root mount point.
-func collectDisk(_ context.Context) model.Disk {
-	d := model.Disk{MountPoint: "/"}
-	out, err := runCmd(context.Background(), "df", "-k", "/")
+// collectDisks reads df output and returns physical mount points (virtual FSes excluded).
+func collectDisks(ctx context.Context) []model.DiskInfo {
+	out, err := runCmd(ctx, "df", "-k")
 	if err != nil {
-		return d
+		return nil
 	}
-	// Skip header; second line has the numbers.
+	// Skip header line; subsequent lines:  Filesystem  1K-blocks  Used  Available  Cap%  Mount
 	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) < 2 {
-		return d
+	var disks []model.DiskInfo
+	for _, line := range lines[1:] {
+		fields := strings.Fields(line)
+		if len(fields) < 6 {
+			continue
+		}
+		fs := fields[0]
+		mount := fields[len(fields)-1]
+		// Exclude pseudo/virtual filesystems.
+		if isVirtualFS(fs, mount) {
+			continue
+		}
+		total, _ := strconv.ParseUint(fields[1], 10, 64)
+		used, _ := strconv.ParseUint(fields[2], 10, 64)
+		avail, _ := strconv.ParseUint(fields[3], 10, 64)
+		if total == 0 {
+			continue
+		}
+		disks = append(disks, model.DiskInfo{
+			MountPoint: mount,
+			FSType:     fs,
+			TotalBytes: total * 1024,
+			UsedBytes:  used * 1024,
+			FreeBytes:  avail * 1024,
+		})
 	}
-	fields := strings.Fields(lines[1])
-	// Filesystem  1K-blocks  Used  Available  Cap%  Mount
-	if len(fields) < 6 {
-		return d
+	return disks
+}
+
+// isVirtualFS returns true for pseudo-filesystems that should not appear in the Disk card.
+func isVirtualFS(fs, mount string) bool {
+	// macOS virtual filesystem types and paths.
+	virtualPrefixes := []string{"devfs", "autofs", "map ", "map:", "tmpfs"}
+	for _, pfx := range virtualPrefixes {
+		if strings.HasPrefix(fs, pfx) {
+			return true
+		}
 	}
-	// df -k gives 1024-byte blocks
-	total, _ := strconv.ParseUint(fields[1], 10, 64)
-	used, _ := strconv.ParseUint(fields[2], 10, 64)
-	avail, _ := strconv.ParseUint(fields[3], 10, 64)
-	d.TotalBytes = total * 1024
-	d.UsedBytes = used * 1024
-	d.FreeBytes = avail * 1024
-	return d
+	virtualMounts := []string{"/dev", "/private/var/vm", "/System/Volumes/VM",
+		"/System/Volumes/Preboot", "/System/Volumes/Update", "/System/Volumes/xarts",
+		"/System/Volumes/iSCPreboot", "/System/Volumes/Hardware"}
+	for _, m := range virtualMounts {
+		if mount == m {
+			return true
+		}
+	}
+	// Exclude any /proc, /sys, /run style mounts.
+	virtualDirs := []string{"/proc", "/sys", "/run"}
+	for _, d := range virtualDirs {
+		if mount == d || strings.HasPrefix(mount, d+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // collectNet samples rx/tx bytes on the primary interface over 1 second.
@@ -490,6 +538,7 @@ func collectProcs(_ context.Context) []model.ProcEntry {
 	}
 	type raw struct {
 		name   string
+		pid    int
 		cpuPct float64
 		memPct float64
 	}
@@ -502,6 +551,7 @@ func collectProcs(_ context.Context) []model.ProcEntry {
 		if len(f) < 11 {
 			continue
 		}
+		pidVal, _ := strconv.Atoi(f[1])
 		cpuPct, err := strconv.ParseFloat(f[2], 64)
 		if err != nil {
 			continue
@@ -511,7 +561,7 @@ func collectProcs(_ context.Context) []model.ProcEntry {
 		if idx := strings.LastIndex(name, "/"); idx >= 0 {
 			name = name[idx+1:]
 		}
-		rows = append(rows, raw{name, cpuPct, memPct})
+		rows = append(rows, raw{name, pidVal, cpuPct, memPct})
 	}
 	// Sort by cpuPct descending (simple insertion sort, small n)
 	for i := 1; i < len(rows); i++ {
@@ -526,6 +576,7 @@ func collectProcs(_ context.Context) []model.ProcEntry {
 	for _, r := range rows[:limit] {
 		procs = append(procs, model.ProcEntry{
 			Name:   r.name,
+			PID:    r.pid,
 			CPUPct: r.cpuPct,
 			MemPct: r.memPct,
 		})

@@ -37,13 +37,19 @@ func (c *linuxCollector) Collect(ctx context.Context) (model.Snapshot, error) {
 	}
 	s.CPU = linuxCPU(ctx)
 	s.Mem = linuxMem()
-	s.Disk = linuxDisk(ctx)
+	s.Disks = linuxDisks(ctx)
 	s.Net = linuxNet()
 	s.Procs = linuxProcs(ctx)
 	s.Thermal.TempC = linuxThermal()
 	s.Thermal.Sensors = linuxThermalSensors()
 	s.Hostname, _ = os.Hostname()
 	s.Uptime = linuxUptime()
+	// GPU: try Nvidia, then AMD.
+	if gpu := collectNvidiaGPU(ctx); gpu != nil {
+		s.GPU = gpu
+	} else if gpu := collectAMDGPU(ctx); gpu != nil {
+		s.GPU = gpu
+	}
 	return s, nil
 }
 
@@ -212,30 +218,6 @@ func linuxMem() model.Mem {
 	return m
 }
 
-// linuxDisk reads df output for /.
-func linuxDisk(ctx context.Context) model.Disk {
-	d := model.Disk{MountPoint: "/"}
-	out, err := runCmd(ctx, "df", "-k", "/")
-	if err != nil {
-		return d
-	}
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) < 2 {
-		return d
-	}
-	fields := strings.Fields(lines[1])
-	if len(fields) < 4 {
-		return d
-	}
-	total, _ := strconv.ParseUint(fields[1], 10, 64)
-	used, _ := strconv.ParseUint(fields[2], 10, 64)
-	avail, _ := strconv.ParseUint(fields[3], 10, 64)
-	d.TotalBytes = total * 1024
-	d.UsedBytes = used * 1024
-	d.FreeBytes = avail * 1024
-	return d
-}
-
 // linuxNet samples rx/tx counters from /sys/class/net over 1 second.
 func linuxNet() model.Net {
 	n := model.Net{}
@@ -321,17 +303,139 @@ func linuxProcs(ctx context.Context) []model.ProcEntry {
 			continue
 		}
 		memPct, _ := strconv.ParseFloat(f[3], 64)
+		pid, _ := strconv.Atoi(f[1])
 		name := f[10]
 		if idx := strings.LastIndex(name, "/"); idx >= 0 {
 			name = name[idx+1:]
 		}
-		procs = append(procs, model.ProcEntry{Name: name, CPUPct: cpuPct, MemPct: memPct})
+		procs = append(procs, model.ProcEntry{Name: name, PID: pid, CPUPct: cpuPct, MemPct: memPct})
 		count++
 	}
 	return procs
 }
 
-// linuxThermalSensors reads all /sys/class/thermal/thermal_zone* entries and returns
+// linuxDisks parses df -B1 -T output and returns non-virtual mount points.
+func linuxDisks(ctx context.Context) []model.DiskInfo {
+	out, err := runCmd(ctx, "df", "-B1", "-T")
+	if err != nil {
+		// Fallback: use -k if -T is unsupported (busybox df).
+		out, err = runCmd(ctx, "df", "-k")
+		if err != nil {
+			return nil
+		}
+		return parseLinuxDfK(out)
+	}
+	return parseLinuxDfBT(out)
+}
+
+// parseLinuxDfBT parses `df -B1 -T` output.
+// Columns: Filesystem Type 1B-blocks Used Available Use% Mount
+func parseLinuxDfBT(out string) []model.DiskInfo {
+	var disks []model.DiskInfo
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	for _, line := range lines[1:] {
+		fields := strings.Fields(line)
+		if len(fields) < 7 {
+			continue
+		}
+		fs := fields[0]
+		fsType := fields[1]
+		mount := fields[len(fields)-1]
+		if isLinuxVirtualFS(fsType, mount) {
+			continue
+		}
+		total, _ := strconv.ParseUint(fields[2], 10, 64)
+		used, _ := strconv.ParseUint(fields[3], 10, 64)
+		avail, _ := strconv.ParseUint(fields[4], 10, 64)
+		if total == 0 {
+			continue
+		}
+		_ = fs
+		disks = append(disks, model.DiskInfo{
+			MountPoint: mount,
+			FSType:     fsType,
+			TotalBytes: total,
+			UsedBytes:  used,
+			FreeBytes:  avail,
+		})
+	}
+	return disks
+}
+
+// parseLinuxDfK parses `df -k` output (busybox fallback).
+func parseLinuxDfK(out string) []model.DiskInfo {
+	var disks []model.DiskInfo
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	for _, line := range lines[1:] {
+		fields := strings.Fields(line)
+		if len(fields) < 6 {
+			continue
+		}
+		fs := fields[0]
+		mount := fields[len(fields)-1]
+		if isLinuxVirtualFS("", mount) || strings.HasPrefix(fs, "none") {
+			continue
+		}
+		total, _ := strconv.ParseUint(fields[1], 10, 64)
+		used, _ := strconv.ParseUint(fields[2], 10, 64)
+		avail, _ := strconv.ParseUint(fields[3], 10, 64)
+		if total == 0 {
+			continue
+		}
+		disks = append(disks, model.DiskInfo{
+			MountPoint: mount,
+			TotalBytes: total * 1024,
+			UsedBytes:  used * 1024,
+			FreeBytes:  avail * 1024,
+		})
+	}
+	return disks
+}
+
+// isLinuxVirtualFS returns true for pseudo-filesystems.
+func isLinuxVirtualFS(fsType, mount string) bool {
+	virtualTypes := map[string]bool{
+		"tmpfs": true, "devtmpfs": true, "sysfs": true, "proc": true,
+		"cgroup": true, "cgroup2": true, "pstore": true, "efivarfs": true,
+		"bpf": true, "securityfs": true, "debugfs": true, "tracefs": true,
+		"hugetlbfs": true, "mqueue": true, "fusectl": true, "devpts": true,
+		"squashfs": true, "overlay": true, "ramfs": true, "none": true,
+	}
+	if fsType != "" && virtualTypes[fsType] {
+		return true
+	}
+	virtualMounts := []string{"/proc", "/sys", "/run", "/dev", "/boot/efi"}
+	for _, m := range virtualMounts {
+		if mount == m || strings.HasPrefix(mount, m+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// linuxDisk reads df output for / (kept for backward compatibility with rpi.go).
+func linuxDisk(ctx context.Context) model.DiskInfo {
+	d := model.DiskInfo{MountPoint: "/"}
+	out, err := runCmd(ctx, "df", "-k", "/")
+	if err != nil {
+		return d
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) < 2 {
+		return d
+	}
+	fields := strings.Fields(lines[1])
+	if len(fields) < 4 {
+		return d
+	}
+	total, _ := strconv.ParseUint(fields[1], 10, 64)
+	used, _ := strconv.ParseUint(fields[2], 10, 64)
+	avail, _ := strconv.ParseUint(fields[3], 10, 64)
+	d.TotalBytes = total * 1024
+	d.UsedBytes = used * 1024
+	d.FreeBytes = avail * 1024
+	return d
+} entries and returns
 // named ThermalSensor values. Zone type names are mapped to friendly labels.
 func linuxThermalSensors() []model.ThermalSensor {
 	var sensors []model.ThermalSensor

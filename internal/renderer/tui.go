@@ -2,14 +2,16 @@
 package renderer
 
 import (
-"fmt"
-"math"
-"os"
-"strings"
+	"fmt"
+	"math"
+	"os"
+	"strings"
+	"time"
 
-"sumi/internal/config"
-"sumi/internal/model"
-"sumi/internal/theme"
+	"golang.org/x/term"
+	"sumi/internal/config"
+	"sumi/internal/model"
+	"sumi/internal/theme"
 )
 
 // Immutable ANSI codes — not theme-configurable.
@@ -44,42 +46,109 @@ teal:   t.Teal.ANSI(),
 
 // tuiRenderer renders snapshots using a configurable theme and border style.
 type tuiRenderer struct {
-compact bool
-tc      themeColors
-box     theme.BoxChars
+	compact      bool
+	tc           themeColors
+	box          theme.BoxChars
+	cfg          config.Config
+	activeAlerts int // count of currently breached thresholds
+	flashOn      bool // true on odd seconds (for border flash)
 }
 
 // NewTUI returns a TUI renderer with the given config, theme, and border style.
 func NewTUI(cfg config.Config, t theme.Theme, bc theme.BoxChars) Renderer {
-return &tuiRenderer{
-compact: cfg.CompactMode,
-tc:      newThemeColors(t),
-box:     bc,
-}
+	return &tuiRenderer{
+		compact: cfg.CompactMode,
+		tc:      newThemeColors(t),
+		box:     bc,
+		cfg:     cfg,
+	}
 }
 
 func (r *tuiRenderer) Render(s model.Snapshot) error {
-fmt.Fprint(os.Stdout, clearAll)
-width := terminalWidth()
-if width < 40 {
-width = 80
+	fmt.Fprint(os.Stdout, clearAll)
+	r.computeAlerts(s)
+	width := terminalWidth()
+	if width < 40 {
+		width = 80
+	}
+	if r.compact {
+		return r.renderCompact(s, width)
+	}
+	return r.renderFull(s, width)
 }
-if r.compact {
-return r.renderCompact(s, width)
-}
-return r.renderFull(s, width)
+
+// computeAlerts evaluates all configured thresholds and sets r.activeAlerts / r.flashOn.
+func (r *tuiRenderer) computeAlerts(s model.Snapshot) {
+	a := r.cfg.Alerts
+	r.activeAlerts = 0
+	r.flashOn = time.Now().Second()%2 == 1
+
+	if a.CPUThreshold > 0 && s.CPU.Usage > a.CPUThreshold {
+		r.activeAlerts++
+	}
+	if a.MemThreshold > 0 && s.Mem.TotalBytes > 0 {
+		memPct := float64(s.Mem.UsedBytes) / float64(s.Mem.TotalBytes) * 100.0
+		if memPct > a.MemThreshold {
+			r.activeAlerts++
+		}
+	}
+	if a.DiskThreshold > 0 {
+		for _, d := range s.Disks {
+			if d.TotalBytes > 0 {
+				diskPct := float64(d.UsedBytes) / float64(d.TotalBytes) * 100.0
+				if diskPct > a.DiskThreshold {
+					r.activeAlerts++
+					break
+				}
+			}
+		}
+	}
+	if a.TempThreshold > 0 {
+		for _, sensor := range s.Thermal.Sensors {
+			if sensor.TempC > a.TempThreshold {
+				r.activeAlerts++
+				break
+			}
+		}
+	}
+	// Bell: emit once per cycle when any alert is active and sound is enabled.
+	if r.activeAlerts > 0 && a.Sound {
+		fmt.Fprint(os.Stdout, "\a")
+	}
 }
 
 func (r *tuiRenderer) renderFull(s model.Snapshot, width int) error {
-half := (width - 3) / 2
-printRow(r.renderThermalCard(s, half), r.renderCPUCard(s, half))
-fmt.Fprintln(os.Stdout)
-printRow(r.renderMemCard(s, half), r.renderDiskCard(s, half))
-fmt.Fprintln(os.Stdout)
-printRow(r.renderNetCard(s, half), r.renderProcsCard(s, half))
-fmt.Fprintln(os.Stdout)
-printCard(r.renderSystemCard(s, width))
-return nil
+	// Grid: left col ≈ 1/3, right col ≈ 2/3.
+	narrow := (width - 3) / 3
+	if narrow < 20 {
+		narrow = 20
+	}
+	wide := width - 3 - narrow
+	if wide < narrow {
+		wide = narrow
+	}
+
+	// Row 1: Thermal (narrow) + CPU (wide)
+	printRow(r.renderThermalCard(s, narrow), r.renderCPUCard(s, wide))
+	fmt.Fprintln(os.Stdout)
+
+	// GPU card (full width, optional)
+	if s.GPU != nil {
+		printCard(r.renderGPUCard(s, width))
+		fmt.Fprintln(os.Stdout)
+	}
+
+	// Row 2: Memory (narrow) + Disk (wide)
+	printRow(r.renderMemCard(s, narrow), r.renderDiskCard(s, wide))
+	fmt.Fprintln(os.Stdout)
+
+	// Row 3: Network (narrow) + Top Processes (wide)
+	printRow(r.renderNetCard(s, narrow), r.renderProcsCard(s, wide))
+	fmt.Fprintln(os.Stdout)
+
+	// Row 4: System (full width)
+	printCard(r.renderSystemCard(s, width))
+	return nil
 }
 
 func (r *tuiRenderer) renderCompact(s model.Snapshot, width int) error {
@@ -94,8 +163,11 @@ if s.Mem.TotalBytes > 0 {
 memPct = float64(s.Mem.UsedBytes) / float64(s.Mem.TotalBytes) * 100.0
 }
 diskPct := 0.0
-if s.Disk.TotalBytes > 0 {
-diskPct = float64(s.Disk.UsedBytes) / float64(s.Disk.TotalBytes) * 100.0
+if len(s.Disks) > 0 {
+	d := s.Disks[0]
+	if d.TotalBytes > 0 {
+		diskPct = float64(d.UsedBytes) / float64(d.TotalBytes) * 100.0
+	}
 }
 printRow(
 r.renderCompactCard("MEM", r.compactMemLine(s, memPct), memPct, half),
@@ -139,9 +211,13 @@ r.pctColor(pct), fmtBytes(s.Mem.UsedBytes), r.tc.text, fmtBytes(s.Mem.TotalBytes
 }
 
 func (r *tuiRenderer) compactDiskLine(s model.Snapshot, pct float64) string {
-return fmt.Sprintf(" %s%-4s%s %s%s%s  %s%.1f%%%s",
-colDim, "mnt", colReset, r.tc.text, s.Disk.MountPoint, colReset,
-r.pctColor(pct), pct, colReset)
+	mnt := "N/A"
+	if len(s.Disks) > 0 {
+		mnt = s.Disks[0].MountPoint
+	}
+	return fmt.Sprintf(" %s%-4s%s %s%s%s  %s%.1f%%%s",
+		colDim, "mnt", colReset, r.tc.text, mnt, colReset,
+		r.pctColor(pct), pct, colReset)
 }
 
 func (r *tuiRenderer) compactNetLine(s model.Snapshot) string {
@@ -224,72 +300,145 @@ fmt.Fprintf(os.Stdout, "%s %s\n", l, r)
 // ---- Full-mode card renderers ----
 
 func (r *tuiRenderer) renderCPUCard(s model.Snapshot, w int) []string {
-barW := w - 2 - 8
-if barW < 2 {
-barW = 2
-}
-bar := r.progressBar(s.CPU.Usage/100.0, barW)
-lines := []string{r.cardTop("CPU", w), r.cardSep(w)}
-lines = append(lines, r.cardLine(fmt.Sprintf(" %s%-6s%s %s", colDim, "load", colReset, bar), w))
-if len(s.CPU.CoreUsages) > 0 {
-blocks := []string{" ", "\u2581", "\u2582", "\u2583", "\u2584", "\u2585", "\u2586", "\u2587", "\u2588"}
-micro := ""
-for _, u := range s.CPU.CoreUsages {
-idx := int(u / 100.0 * 8.0)
-if idx > 8 {
-idx = 8
-}
-micro += blocks[idx]
-}
-lines = append(lines, r.cardLine(fmt.Sprintf(" %s%-6s%s %s%s%s", colDim, "cores", colReset, r.pctColor(s.CPU.Usage), micro, colReset), w))
-} else {
-lines = append(lines, r.cardEmpty(w))
-lines = append(lines, r.cardLine(fmt.Sprintf(" %s%-6s%s %s%d%s", colDim, "cores", colReset, r.tc.text, s.CPU.Cores, colReset), w))
-}
-lines = append(lines, r.cardEmpty(w))
-lines = append(lines, r.cardBottom(w))
-return lines
+	cpuAlert := r.cfg.Alerts.CPUThreshold > 0 && s.CPU.Usage > r.cfg.Alerts.CPUThreshold
+	lines := []string{r.cardTopAlert("CPU", w, cpuAlert), r.cardSep(w)}
+
+	// Headline: big % + per-core mini blocks + core count.
+	pctStr := fmt.Sprintf("%s%.1f%%%s", r.pctColor(s.CPU.Usage), s.CPU.Usage, colReset)
+	blocks := []string{" ", "\u2581", "\u2582", "\u2583", "\u2584", "\u2585", "\u2586", "\u2587", "\u2588"}
+	micro := ""
+	if len(s.CPU.CoreUsages) > 0 {
+		for _, u := range s.CPU.CoreUsages {
+			idx := int(u / 100.0 * 8.0)
+			if idx > 8 {
+				idx = 8
+			}
+			micro += blocks[idx]
+		}
+	}
+	coresLabel := fmt.Sprintf("%s%d cores%s", colDim, s.CPU.Cores, colReset)
+	if micro != "" {
+		headline := fmt.Sprintf(" %-10s %s%s%s  %s", pctStr, r.pctColor(s.CPU.Usage), micro, colReset, coresLabel)
+		lines = append(lines, r.cardLine(headline, w))
+	} else {
+		headline := fmt.Sprintf(" %-10s  %s", pctStr, coresLabel)
+		lines = append(lines, r.cardLine(headline, w))
+	}
+
+	// Full-width progress bar.
+	barW := w - 4
+	if barW < 2 {
+		barW = 2
+	}
+	lines = append(lines, r.cardLine(" "+r.progressBar(s.CPU.Usage/100.0, barW), w))
+
+	// Sparkline only when per-core data AND spark history are available.
+	if len(s.CPU.CoreUsages) > 0 && s.History.CPUSpark != "" {
+		lines = append(lines, r.cardLine(fmt.Sprintf(" %s%s%s", r.pctColor(s.CPU.Usage), s.History.CPUSpark, colReset), w))
+	} else {
+		lines = append(lines, r.cardEmpty(w))
+	}
+	lines = append(lines, r.cardBottom(w))
+	return lines
 }
 
 func (r *tuiRenderer) renderMemCard(s model.Snapshot, w int) []string {
-var pct float64
-if s.Mem.TotalBytes > 0 {
-pct = float64(s.Mem.UsedBytes) / float64(s.Mem.TotalBytes) * 100.0
-}
-bar := r.progressBar(pct/100.0, w-4)
-lines := []string{r.cardTop("Memory", w)}
-lines = append(lines, r.cardLine(fmt.Sprintf("%sTotal:%s %s%s%s", r.tc.cyan, colReset, r.tc.text, fmtBytes(s.Mem.TotalBytes), colReset), w))
-lines = append(lines, r.cardLine(fmt.Sprintf("%sUsed:%s  %s%s%s", r.tc.cyan, colReset, r.pctColor(pct), fmtBytes(s.Mem.UsedBytes), colReset), w))
-lines = append(lines, r.cardLine(fmt.Sprintf("%sFree:%s  %s%s%s", r.tc.cyan, colReset, r.tc.green, fmtBytes(s.Mem.FreeBytes), colReset), w))
-lines = append(lines, r.cardLine(fmt.Sprintf("%sUsage:%s %s%.1f%%%s", r.tc.cyan, colReset, r.pctColor(pct), pct, colReset), w))
-lines = append(lines, r.cardLine(bar, w))
-if s.Mem.SwapTotal > 0 {
-swapPct := float64(s.Mem.SwapUsed) / float64(s.Mem.SwapTotal) * 100.0
-swapBar := r.progressBar(swapPct/100.0, w-4)
-lines = append(lines, r.cardLine(fmt.Sprintf("%sSwap:%s  %s%s%s / %s%s%s",
-r.tc.cyan, colReset, r.pctColor(swapPct), fmtBytes(s.Mem.SwapUsed), colReset,
-r.tc.text, fmtBytes(s.Mem.SwapTotal), colReset), w))
-lines = append(lines, r.cardLine(swapBar, w))
-}
-lines = append(lines, r.cardBottom(w))
-return lines
+	var pct float64
+	if s.Mem.TotalBytes > 0 {
+		pct = float64(s.Mem.UsedBytes) / float64(s.Mem.TotalBytes) * 100.0
+	}
+	memAlert := r.cfg.Alerts.MemThreshold > 0 && pct > r.cfg.Alerts.MemThreshold
+	lines := []string{r.cardTopAlert("Memory", w, memAlert), r.cardSep(w)}
+
+	// Headline: big % as primary accent.
+	lines = append(lines, r.cardLine(fmt.Sprintf(" %s%.1f%%%s", r.pctColor(pct), pct, colReset), w))
+	lines = append(lines, r.cardLine(fmt.Sprintf(" %s%s%s / %s%s%s",
+		r.pctColor(pct), fmtBytes(s.Mem.UsedBytes), colReset,
+		r.tc.text, fmtBytes(s.Mem.TotalBytes), colReset), w))
+
+	// Full-width bar.
+	barW := w - 4
+	if barW < 2 {
+		barW = 2
+	}
+	lines = append(lines, r.cardLine(" "+r.progressBar(pct/100.0, barW), w))
+
+	// Swap row (when available): % + absolute values (if they fit) + bar.
+	if s.Mem.SwapTotal > 0 {
+		swapPct := float64(s.Mem.SwapUsed) / float64(s.Mem.SwapTotal) * 100.0
+		swapBarW := w - 4
+		if swapBarW < 2 {
+			swapBarW = 2
+		}
+		// Build the full line; fall back to % only when sizes don't fit.
+		fullLine := fmt.Sprintf(" %sswap%s  %s%.1f%%%s  %s%s / %s%s",
+			colDim, colReset,
+			r.pctColor(swapPct), swapPct, colReset,
+			colDim, fmtBytes(s.Mem.SwapUsed), fmtBytes(s.Mem.SwapTotal), colReset)
+		if visibleLen(fullLine) > w-2 {
+			fullLine = fmt.Sprintf(" %sswap%s  %s%.1f%%%s",
+				colDim, colReset, r.pctColor(swapPct), swapPct, colReset)
+		}
+		lines = append(lines, r.cardLine(fullLine, w))
+		lines = append(lines, r.cardLine(" "+r.progressBar(swapPct/100.0, swapBarW), w))
+	}
+
+	lines = append(lines, r.cardBottom(w))
+	return lines
 }
 
 func (r *tuiRenderer) renderDiskCard(s model.Snapshot, w int) []string {
-var pct float64
-if s.Disk.TotalBytes > 0 {
-pct = float64(s.Disk.UsedBytes) / float64(s.Disk.TotalBytes) * 100.0
-}
-bar := r.progressBar(pct/100.0, w-4)
-lines := []string{r.cardTop("Disk", w)}
-lines = append(lines, r.cardLine(fmt.Sprintf("%sMount:%s  %s%s%s", r.tc.cyan, colReset, r.tc.text, s.Disk.MountPoint, colReset), w))
-lines = append(lines, r.cardLine(fmt.Sprintf("%sTotal:%s  %s%s%s", r.tc.cyan, colReset, r.tc.text, fmtBytes(s.Disk.TotalBytes), colReset), w))
-lines = append(lines, r.cardLine(fmt.Sprintf("%sUsed:%s   %s%s%s", r.tc.cyan, colReset, r.pctColor(pct), fmtBytes(s.Disk.UsedBytes), colReset), w))
-lines = append(lines, r.cardLine(fmt.Sprintf("%sFree:%s   %s%s%s", r.tc.cyan, colReset, r.tc.green, fmtBytes(s.Disk.FreeBytes), colReset), w))
-lines = append(lines, r.cardLine(fmt.Sprintf("%sUsage:%s  %s%.1f%%%s", r.tc.cyan, colReset, r.pctColor(pct), pct, colReset), w))
-lines = append(lines, r.cardLine(bar, w))
-lines = append(lines, r.cardBottom(w))
-return lines
+	count := len(s.Disks)
+	titleSuffix := ""
+	if count > 1 {
+		titleSuffix = fmt.Sprintf(" %d", count)
+	}
+	lines := []string{r.cardTop("Disk"+titleSuffix, w)}
+
+	if count == 0 {
+		lines = append(lines, r.cardEmpty(w))
+		lines = append(lines, r.cardBottom(w))
+		return lines
+	}
+
+	// Show up to 4 disks; each entry: 2 lines — (mount+pct+total) and bar.
+	for i, d := range s.Disks {
+		if i >= 4 {
+			break
+		}
+		var pct float64
+		if d.TotalBytes > 0 {
+			pct = float64(d.UsedBytes) / float64(d.TotalBytes) * 100.0
+		}
+		barW := w - 4
+		if barW < 2 {
+			barW = 2
+		}
+		if i > 0 {
+			lines = append(lines, r.cardSep(w))
+		}
+		// Line 1: mount (truncated)  pct%  ·  total
+		// suffix = "  pct%  ·  total", compute its visible length to truncate mount.
+		suffix := fmt.Sprintf("  %s%.1f%%%s  %s\u00b7%s  %s%s%s",
+			r.pctColor(pct), pct, colReset,
+			colDim, colReset,
+			r.tc.text, fmtBytes(d.TotalBytes), colReset)
+		suffixVis := visibleLen(suffix)
+		mountMaxW := w - 2 - suffixVis
+		if mountMaxW < 3 {
+			mountMaxW = 3
+		}
+		mnt := d.MountPoint
+		if len(mnt) > mountMaxW {
+			mnt = "\u2026" + mnt[len(mnt)-mountMaxW+1:]
+		}
+		lines = append(lines, r.cardLine(fmt.Sprintf("%s%s%s%s", r.tc.cyan, mnt, colReset, suffix), w))
+		// Line 2: progress bar.
+		lines = append(lines, r.cardLine(" "+r.progressBar(pct/100.0, barW), w))
+	}
+
+	lines = append(lines, r.cardBottom(w))
+	return lines
 }
 
 func (r *tuiRenderer) renderNetCard(s model.Snapshot, w int) []string {
@@ -332,7 +481,16 @@ return lines
 }
 
 func (r *tuiRenderer) renderThermalCard(s model.Snapshot, w int) []string {
-	lines := []string{r.cardTop("THERMAL", w), r.cardSep(w)}
+	tempAlert := false
+	if r.cfg.Alerts.TempThreshold > 0 {
+		for _, sensor := range s.Thermal.Sensors {
+			if sensor.TempC > r.cfg.Alerts.TempThreshold {
+				tempAlert = true
+				break
+			}
+		}
+	}
+	lines := []string{r.cardTopAlert("THERMAL", w, tempAlert), r.cardSep(w)}
 
 	if len(s.Thermal.Sensors) > 0 {
 		// Show up to 3 named sensor rows (CPU, GPU, SSD).
@@ -404,56 +562,122 @@ func (r *tuiRenderer) renderThermalCard(s model.Snapshot, w int) []string {
 	return lines
 }
 
-func (r *tuiRenderer) renderSystemCard(s model.Snapshot, w int) []string {
-host := s.Hostname
-if host == "" {
-host = "N/A"
+func (r *tuiRenderer) renderGPUCard(s model.Snapshot, w int) []string {
+	gpu := s.GPU
+	lines := []string{r.cardTop("GPU", w), r.cardSep(w)}
+	if gpu == nil {
+		lines = append(lines, r.cardEmpty(w))
+		lines = append(lines, r.cardBottom(w))
+		return lines
+	}
+	name := gpu.Name
+	if name == "" {
+		name = gpu.Driver
+	}
+	lines = append(lines, r.cardLine(fmt.Sprintf(" %s%-7s%s %s%s%s",
+		colDim, "name", colReset, r.tc.cyan, name, colReset), w))
+	lines = append(lines, r.cardLine(fmt.Sprintf(" %s%-7s%s %s%.1f%%%s",
+		colDim, "usage", colReset, r.pctColor(gpu.UsagePct), gpu.UsagePct, colReset), w))
+	if gpu.TempC > 0 {
+		lines = append(lines, r.cardLine(fmt.Sprintf(" %s%-7s%s %s%.1f\u00b0C%s",
+			colDim, "temp", colReset, r.thermalColor(gpu.TempC), gpu.TempC, colReset), w))
+	} else {
+		lines = append(lines, r.cardEmpty(w))
+	}
+	if gpu.VRAMTotalMiB > 0 {
+		vramPct := float64(gpu.VRAMUsedMiB) / float64(gpu.VRAMTotalMiB) * 100.0
+		lines = append(lines, r.cardLine(fmt.Sprintf(" %s%-7s%s %s%d MiB%s / %s%d MiB%s  %s%.1f%%%s",
+			colDim, "vram", colReset,
+			r.pctColor(vramPct), gpu.VRAMUsedMiB, colReset,
+			r.tc.text, gpu.VRAMTotalMiB, colReset,
+			r.pctColor(vramPct), vramPct, colReset), w))
+	} else {
+		lines = append(lines, r.cardEmpty(w))
+	}
+	lines = append(lines, r.cardBottom(w))
+	return lines
 }
-platStr := s.Platform
-if platStr == "" {
-platStr = "N/A"
-}
-upt := s.Uptime
-if upt == "" {
-upt = "N/A"
-}
-dateStr := s.Timestamp.Format("2006-01-02")
-timeStr := s.Timestamp.Format("15:04:05")
 
-lines := []string{r.cardTop("System", w), r.cardSep(w)}
-line1 := fmt.Sprintf(" %s%-10s%s %s%-20s%s %s%-10s%s %s%-14s%s %s%-5s%s %s%s%s",
-colDim, "host", colReset, r.tc.cyan, host, colReset,
-colDim, "platform", colReset, r.tc.text, platStr, colReset,
-colDim, "date", colReset, r.tc.text, dateStr, colReset)
-lines = append(lines, r.cardLine(line1, w))
-line2 := fmt.Sprintf(" %s%-10s%s %s%-20s%s %s%-10s%s %s%s%s",
-colDim, "uptime", colReset, r.tc.green, upt, colReset,
-colDim, "time", colReset, r.tc.text, timeStr, colReset)
-lines = append(lines, r.cardLine(line2, w))
-lines = append(lines, r.cardBottom(w))
-return lines
+func (r *tuiRenderer) renderSystemCard(s model.Snapshot, w int) []string {
+	host := s.Hostname
+	if host == "" {
+		host = "N/A"
+	}
+	platStr := s.Platform
+	if platStr == "" {
+		platStr = "N/A"
+	}
+	upt := s.Uptime
+	if upt == "" {
+		upt = "N/A"
+	}
+	dateStr := s.Timestamp.Format("2006-01-02")
+	timeStr := s.Timestamp.Format("15:04:05")
+
+	lines := []string{r.cardTop("System", w)}
+
+	// Row 1: host  platform  date — aligned columns, label width=10.
+	row1 := fmt.Sprintf(" %s%-10s%s %s%-20s%s  %s%-10s%s %s%-12s%s  %s%-5s%s %s%s%s",
+		colDim, "host", colReset, r.tc.cyan, host, colReset,
+		colDim, "platform", colReset, r.tc.text, platStr, colReset,
+		colDim, "date", colReset, r.tc.text, dateStr, colReset)
+	lines = append(lines, r.cardLine(row1, w))
+
+	// Row 2: uptime  time  (alerts if configured).
+	a := r.cfg.Alerts
+	anyThreshold := a.CPUThreshold > 0 || a.MemThreshold > 0 || a.DiskThreshold > 0 || a.TempThreshold > 0
+	row2 := fmt.Sprintf(" %s%-10s%s %s%-20s%s  %s%-10s%s %s%s%s",
+		colDim, "uptime", colReset, r.tc.green, upt, colReset,
+		colDim, "time", colReset, r.tc.text, timeStr, colReset)
+	if anyThreshold {
+		alertStr := "none"
+		alertCol := r.tc.green
+		if r.activeAlerts > 0 {
+			alertStr = fmt.Sprintf("%d ACTIVE", r.activeAlerts)
+			alertCol = r.tc.red
+		}
+		row2 += fmt.Sprintf("  %s%-10s%s %s%s%s",
+			colDim, "alerts", colReset, alertCol, alertStr, colReset)
+	}
+	lines = append(lines, r.cardLine(row2, w))
+
+	lines = append(lines, r.cardBottom(w))
+	return lines
 }
 
 // ---- Card border helpers ----
 
 func (r *tuiRenderer) cardTop(title string, w int) string {
-inner := w - 2
-titleFormatted := fmt.Sprintf(" %s%s%s ", r.tc.title, title, r.tc.border)
-titleVisLen := len(title) + 2
-dashCount := inner - titleVisLen
-if dashCount < 0 {
-dashCount = 0
+	return r.cardTopColored(title, w, r.tc.border)
 }
-rightDash := dashCount - 1
-if rightDash < 0 {
-rightDash = 0
+
+// cardTopAlert renders the top border in the theme's red color when an alert is flashing.
+func (r *tuiRenderer) cardTopAlert(title string, w int, alertActive bool) string {
+	col := r.tc.border
+	if alertActive && r.flashOn {
+		col = r.tc.red
+	}
+	return r.cardTopColored(title, w, col)
 }
-return fmt.Sprintf("%s%s%s%s%s%s%s",
-r.tc.border, r.box.TL,
-strings.Repeat(r.box.H, 1),
-titleFormatted,
-strings.Repeat(r.box.H, rightDash),
-r.box.TR, colReset)
+
+func (r *tuiRenderer) cardTopColored(title string, w int, borderCol string) string {
+	inner := w - 2
+	titleFormatted := fmt.Sprintf(" %s%s%s ", r.tc.title, title, borderCol)
+	titleVisLen := len(title) + 2
+	dashCount := inner - titleVisLen
+	if dashCount < 0 {
+		dashCount = 0
+	}
+	rightDash := dashCount - 1
+	if rightDash < 0 {
+		rightDash = 0
+	}
+	return fmt.Sprintf("%s%s%s%s%s%s%s",
+		borderCol, r.box.TL,
+		strings.Repeat(r.box.H, 1),
+		titleFormatted,
+		strings.Repeat(r.box.H, rightDash),
+		r.box.TR, colReset)
 }
 
 func (r *tuiRenderer) cardBottom(w int) string {
@@ -560,9 +784,17 @@ n++
 return n
 }
 
-// terminalWidth returns the current terminal width, or 80 as fallback.
+// terminalWidth returns the current terminal width, clamped to [40, 220].
+// Falls back to 80 when stdout is not a TTY (pipe, test, non-interactive).
 func terminalWidth() int {
-return 80
+	w, _, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil || w < 40 {
+		return 80
+	}
+	if w > 220 {
+		return 220
+	}
+	return w
 }
 
 // HideCursor and ShowCursor are called by main for watch mode.
