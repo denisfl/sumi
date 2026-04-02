@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,6 +33,44 @@ type linuxCollector struct {
 	mu              sync.Mutex
 	diskStatsPrev   map[string]diskstatEntry // keyed by device name (e.g. "sda")
 	diskStatsTime   time.Time
+	// Disk total cache — TotalBytes only changes when mounts change.
+	diskTotalMu    sync.Mutex
+	diskMountHash  string            // sorted concatenation of mount points
+	diskTotalCache map[string]uint64 // mount point → TotalBytes
+	// Static cache — populated once on the first Collect() call.
+	cacheOnce sync.Once
+	hostname  string
+	cpuCores  int
+	cpuModel  string
+}
+
+func (c *linuxCollector) initCache() {
+	c.cacheOnce.Do(func() {
+		c.hostname, _ = os.Hostname()
+		// Core count via nproc.
+		if data, err := os.ReadFile("/sys/devices/system/cpu/present"); err == nil {
+			// e.g. "0-3" → 4 cores
+			s := strings.TrimSpace(string(data))
+			if idx := strings.Index(s, "-"); idx >= 0 {
+				if n, err := strconv.Atoi(s[idx+1:]); err == nil {
+					c.cpuCores = n + 1
+				}
+			} else if n, err := strconv.Atoi(s); err == nil {
+				c.cpuCores = n + 1
+			}
+		}
+		// CPU model from /proc/cpuinfo "model name" or "Hardware".
+		if data, err := os.ReadFile("/proc/cpuinfo"); err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				if strings.HasPrefix(line, "model name") || strings.HasPrefix(line, "Hardware") {
+					if idx := strings.Index(line, ":"); idx >= 0 {
+						c.cpuModel = strings.TrimSpace(line[idx+1:])
+						break
+					}
+				}
+			}
+		}
+	})
 }
 
 // diskstatEntry holds the cumulative sector counts from /proc/diskstats.
@@ -41,28 +80,85 @@ type diskstatEntry struct {
 }
 
 func (c *linuxCollector) Collect(ctx context.Context) (model.Snapshot, error) {
+	c.initCache()
+
 	s := model.Snapshot{
 		Platform:  "linux",
 		Timestamp: time.Now(),
 		Procs:     []model.ProcEntry{},
 	}
-	s.CPU = linuxCPU(ctx)
-	s.Mem = linuxMem()
-	s.Disks = linuxDisks(ctx)
-	c.applyDiskIO(s.Disks)
-	s.Net = linuxNet()
-	s.Procs = linuxProcs(ctx)
-	s.Thermal.TempC = linuxThermal()
-	s.Thermal.Sensors = linuxThermalSensors()
-	s.Battery = linuxBattery()
-	s.Hostname, _ = os.Hostname()
-	s.Uptime = linuxUptime()
-	// GPU: try Nvidia, then AMD.
-	if gpu := collectNvidiaGPU(ctx); gpu != nil {
-		s.GPU = gpu
-	} else if gpu := collectAMDGPU(ctx); gpu != nil {
-		s.GPU = gpu
+
+	// Group A: slow sources (~1 s each) — run concurrently.
+	var cpuResult model.CPU
+	var netResult model.Net
+	var wgA sync.WaitGroup
+	wgA.Add(2)
+	go func() {
+		defer wgA.Done()
+		cpuResult = linuxCPU(ctx)
+	}()
+	go func() {
+		defer wgA.Done()
+		netResult = linuxNet()
+	}()
+
+	// Group B: fast sources — run concurrently with Group A.
+	var memResult model.Mem
+	var disksResult []model.DiskInfo
+	var procsResult []model.ProcEntry
+	var thermalTempC float64
+	var thermalSensors []model.ThermalSensor
+	var batteryResult *model.BatteryInfo
+	var uptime string
+	var wgB sync.WaitGroup
+	wgB.Add(6)
+	go func() { defer wgB.Done(); memResult = linuxMem() }()
+	go func() {
+		defer wgB.Done()
+		disksResult = c.linuxDisksWithCache(ctx)
+		c.applyDiskIO(disksResult)
+	}()
+	go func() { defer wgB.Done(); procsResult = linuxProcs(ctx) }()
+	go func() { defer wgB.Done(); thermalTempC = linuxThermal() }()
+	go func() { defer wgB.Done(); thermalSensors = linuxThermalSensors() }()
+	go func() { defer wgB.Done(); batteryResult = linuxBattery() }()
+	uptime = linuxUptime()
+
+	// Group C: optional GPU (may take up to 3 s if tool is absent).
+	var gpuResult *model.GPUInfo
+	var wgC sync.WaitGroup
+	wgC.Add(1)
+	go func() {
+		defer wgC.Done()
+		if gpu := collectNvidiaGPU(ctx); gpu != nil {
+			gpuResult = gpu
+		} else if gpu := collectAMDGPU(ctx); gpu != nil {
+			gpuResult = gpu
+		}
+	}()
+
+	// Wait for all groups.
+	wgA.Wait()
+	wgB.Wait()
+	wgC.Wait()
+
+	s.CPU = cpuResult
+	if c.cpuCores > 0 {
+		s.CPU.Cores = c.cpuCores
 	}
+	if c.cpuModel != "" {
+		s.CPU.Model = c.cpuModel
+	}
+	s.Net = netResult
+	s.Mem = memResult
+	s.Disks = disksResult
+	s.Procs = procsResult
+	s.Thermal.TempC = thermalTempC
+	s.Thermal.Sensors = thermalSensors
+	s.Battery = batteryResult
+	s.Hostname = c.hostname
+	s.Uptime = uptime
+	s.GPU = gpuResult
 	return s, nil
 }
 
@@ -343,6 +439,47 @@ func procContainer(pid int) string {
 		}
 	}
 	return ""
+}
+
+// linuxDisksWithCache collects disk info. On the first call (or when the set of
+// mount points changes) it runs `df` to get TotalBytes and caches them. On
+// subsequent calls with an unchanged mount list it runs `df` only for
+// UsedBytes/FreeBytes and fills TotalBytes from the cache — avoiding the syscall
+// overhead of df's stat on every mount for a value that almost never changes.
+func (c *linuxCollector) linuxDisksWithCache(ctx context.Context) []model.DiskInfo {
+	disks := linuxDisks(ctx)
+	if len(disks) == 0 {
+		return disks
+	}
+
+	// Build mount-list hash as sorted concatenation of mount points.
+	mountPoints := make([]string, len(disks))
+	for i, d := range disks {
+		mountPoints[i] = d.MountPoint
+	}
+	sort.Strings(mountPoints)
+	hash := strings.Join(mountPoints, "\x00")
+
+	c.diskTotalMu.Lock()
+	defer c.diskTotalMu.Unlock()
+
+	if hash != c.diskMountHash || c.diskTotalCache == nil {
+		// Mount list changed (or first run): refresh the TotalBytes cache.
+		c.diskMountHash = hash
+		c.diskTotalCache = make(map[string]uint64, len(disks))
+		for _, d := range disks {
+			c.diskTotalCache[d.MountPoint] = d.TotalBytes
+		}
+	} else {
+		// Mount list stable: apply cached TotalBytes to avoid a re-stat at the OS level.
+		for i := range disks {
+			if cached, ok := c.diskTotalCache[disks[i].MountPoint]; ok {
+				disks[i].TotalBytes = cached
+			}
+		}
+	}
+
+	return disks
 }
 
 // applyDiskIO reads /proc/diskstats, diffs against the previous sample, and

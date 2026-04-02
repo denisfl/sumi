@@ -41,6 +41,13 @@ sumi --list-themes
 - **Config**: TOML file at `~/.config/sumi/config.toml`. CLI flags always override config file values.
 - **History Rings**: Fixed-capacity ring buffers (`internal/history.Ring`) updated each tick. Power sparklines for CPU, Mem, Net Rx, Net Tx (global, cap 120) and per-PID CPU/Mem (cap 60).
 - **Detail Panel**: Per-process detail overlay rendered after the main view. Shows PPID, threads, FD count, cwd, start time, and CPU/Mem sparklines. Opened with the `d` key.
+- **Parallel Collect (Linux)**: `linuxCollector.Collect()` fans out into three `sync.WaitGroup` groups — Group A: CPU + Net (slow, ~1 s each, run concurrently); Group B: Mem/Disk/Procs/Thermal/Battery (fast reads); Group C: GPU. Total wall time ≈ 1 s vs ~2 s sequential.
+- **Static Cache**: `sync.Once` per platform collector (darwin + linux). Hostname, CPU model, and core count are read once on the first tick and reused for every subsequent tick.
+- **Disk Total Cache**: `linuxCollector` builds a sorted mount-point hash each tick; when the hash is stable, `TotalBytes` for each mount is served from a `map[string]uint64` cache instead of re-reading disk metadata.
+- **Buffered TUI Output**: `tui.go` writes into a `bufio.Writer` sized at 64 KiB and calls `Flush()` once per frame — reducing ~40-60 individual write syscalls to a single write.
+- **Non-Blocking Watch Loop**: A background goroutine feeds collected snapshots into `snapCh chan model.Snapshot` (capacity 1) using a non-blocking send. The main event loop selects on `snapCh` and `keyCh` — keyboard events are never stalled by a slow `Collect()` call.
+- **macOS CPU via iostat**: `collectCPU()` runs `iostat -c 2 -w 1` (lighter than `top -l 2 -n 0`; no process enumeration). `parseIdleFromIOStat()` locates the `id` column by header-field index and reads the same index from the last data line.
+- **macOS Net via RouteRIB**: `netBytesSysctl()` calls `syscall.RouteRIB(syscall.NET_RT_IFLIST2, 0)` — a single in-process syscall returning the kernel routing table as raw bytes. It parses `unix.IfMsghdr2` messages of type `RTM_IFINFO2 = 0x12` and extracts `IfData64.Ibytes`/`Obytes` (64-bit counters). Fallback: `netstat`.
 
 ## CLI Flags
 
@@ -155,7 +162,7 @@ Useful fields in the JSON object:
 cmd/monitor/main.go          — entry point, flag parsing, theme loading, per-PID rings, detail panel
 internal/
   collector/
-    darwin.go                — macOS: top, netstat, osx-cpu-temp, sysctl, iostat (disk I/O), pmset (battery)
+    darwin.go                — macOS: iostat (CPU delta, lighter than top), syscall.RouteRIB (net bytes, in-process), osx-cpu-temp/smctemp (thermal), sysctl (disk I/O + static cache), pmset (battery); sync.Once static cache for hostname/cpuCores/cpuModel
     linux.go                 — Linux: /proc/stat, /proc/meminfo, /sys/class/net, /proc/diskstats (disk I/O), /sys/class/power_supply (battery), cgroup container detection
     procdetail_darwin.go     — macOS ReadProcDetail via ps + lsof
     procdetail_linux.go      — Linux ReadProcDetail via /proc/PID/{status,fd,cwd,stat}

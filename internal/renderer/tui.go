@@ -2,6 +2,7 @@
 package renderer
 
 import (
+	"bufio"
 	"fmt"
 	"math"
 	"os"
@@ -14,6 +15,10 @@ import (
 	"sumi/internal/model"
 	"sumi/internal/theme"
 )
+
+// out is a 64 KiB buffered writer over os.Stdout.
+// All TUI output goes through it; Render() flushes once per frame.
+var out = bufio.NewWriterSize(os.Stdout, 64*1024)
 
 // Immutable ANSI codes — not theme-configurable.
 const (
@@ -66,16 +71,20 @@ func NewTUI(cfg config.Config, t theme.Theme, bc theme.BoxChars) Renderer {
 }
 
 func (r *tuiRenderer) Render(s model.Snapshot) error {
-	fmt.Fprint(os.Stdout, clearAll)
+	fmt.Fprint(out, clearAll)
 	r.computeAlerts(s)
 	width := terminalWidth()
 	if width < 40 {
 		width = 80
 	}
+	var err error
 	if r.compact {
-		return r.renderCompact(s, width)
+		err = r.renderCompact(s, width)
+	} else {
+		err = r.renderFull(s, width)
 	}
-	return r.renderFull(s, width)
+	_ = out.Flush()
+	return err
 }
 
 // computeAlerts evaluates all configured thresholds and sets r.activeAlerts / r.flashOn.
@@ -114,7 +123,7 @@ func (r *tuiRenderer) computeAlerts(s model.Snapshot) {
 	}
 	// Bell: emit once per cycle when any alert is active and sound is enabled.
 	if r.activeAlerts > 0 && a.Sound {
-		fmt.Fprint(os.Stdout, "\a")
+		fmt.Fprint(out, "\a")
 	}
 }
 
@@ -131,26 +140,26 @@ func (r *tuiRenderer) renderFull(s model.Snapshot, width int) error {
 
 	// Row 1: Thermal (narrow) + CPU (wide)
 	printRow(r.renderThermalCard(s, narrow), r.renderCPUCard(s, wide))
-	fmt.Fprint(os.Stdout, "\r\n")
+	fmt.Fprint(out, "\r\n")
 
 	// GPU card (full width, optional)
 	if s.GPU != nil {
 		printCard(r.renderGPUCard(s, width))
-		fmt.Fprint(os.Stdout, "\r\n")
+		fmt.Fprint(out, "\r\n")
 	}
 
 	// Row 2: Memory (narrow) + Disk (wide)
 	printRow(r.renderMemCard(s, narrow), r.renderDiskCard(s, wide))
-	fmt.Fprint(os.Stdout, "\r\n")
+	fmt.Fprint(out, "\r\n")
 
 	// Row 3: Network (narrow) + Top Processes (wide)
 	printRow(r.renderNetCard(s, narrow), r.renderProcsCard(s, wide))
-	fmt.Fprint(os.Stdout, "\r\n")
+	fmt.Fprint(out, "\r\n")
 
 	// Battery card (full width, optional)
 	if s.Battery != nil {
 		printCard(r.renderBatteryCard(s, width))
-		fmt.Fprint(os.Stdout, "\r\n")
+		fmt.Fprint(out, "\r\n")
 	}
 
 	// Row 4: System (full width)
@@ -179,13 +188,13 @@ func RenderDetailPanel(det model.ProcDetail) {
 	}
 
 	title := fmt.Sprintf(" \x1b[36mProcess Detail\x1b[0m  \x1b[2m[d] close\x1b[0m")
-	fmt.Fprint(os.Stdout, top+"\r\n")
-	fmt.Fprint(os.Stdout, line(title)+"\r\n")
-	fmt.Fprint(os.Stdout, sep+"\r\n")
+	fmt.Fprint(out, top+"\r\n")
+	fmt.Fprint(out, line(title)+"\r\n")
+	fmt.Fprint(out, sep+"\r\n")
 
 	row := func(label, val string) {
 		content := fmt.Sprintf(" \x1b[2m%-12s\x1b[0m \x1b[36m%s\x1b[0m", label, val)
-		fmt.Fprint(os.Stdout, line(content)+"\r\n")
+		fmt.Fprint(out, line(content)+"\r\n")
 	}
 
 	row("pid", strconv.Itoa(det.PID))
@@ -202,7 +211,8 @@ func RenderDetailPanel(det model.ProcDetail) {
 		row("mem history", "\x1b[33m"+det.MemSpark+"\x1b[0m")
 	}
 
-	fmt.Fprint(os.Stdout, bot+"\r\n")
+	fmt.Fprint(out, bot+"\r\n")
+	_ = out.Flush()
 }
 
 func (r *tuiRenderer) renderCompact(s model.Snapshot, width int) error {
@@ -211,7 +221,7 @@ printRow(
 r.renderCompactCard("THERMAL", r.compactThermalLine(s), 0, half),
 r.renderCompactCard("CPU", r.compactCPULine(s), s.CPU.Usage, half),
 )
-fmt.Fprint(os.Stdout, "\r\n")
+fmt.Fprint(out, "\r\n")
 memPct := 0.0
 if s.Mem.TotalBytes > 0 {
 memPct = float64(s.Mem.UsedBytes) / float64(s.Mem.TotalBytes) * 100.0
@@ -227,7 +237,7 @@ printRow(
 r.renderCompactCard("MEM", r.compactMemLine(s, memPct), memPct, half),
 r.renderCompactCard("DISK", r.compactDiskLine(s, diskPct), diskPct, half),
 )
-fmt.Fprint(os.Stdout, "\r\n")
+fmt.Fprint(out, "\r\n")
 printRow(
 r.renderCompactCard("NET", r.compactNetLine(s), -1, half),
 r.renderCompactCard("SYSTEM", r.compactSysLine(s), -1, half),
@@ -321,7 +331,7 @@ func (r *tuiRenderer) compactThermalLine(s model.Snapshot) string {
 
 func printCard(lines []string) {
 for _, l := range lines {
-fmt.Fprint(os.Stdout, l+"\r\n")
+fmt.Fprint(out, l+"\r\n")
 }
 }
 
@@ -347,7 +357,7 @@ l = left[i]
 if i < len(right) {
 r = right[i]
 }
-		fmt.Fprint(os.Stdout, l+" "+r+"\r\n")
+		fmt.Fprint(out, l+" "+r+"\r\n")
 }
 }
 
@@ -934,9 +944,9 @@ func terminalWidth() int {
 
 // HideCursor and ShowCursor are called by main for watch mode.
 func HideCursor() {
-fmt.Fprint(os.Stdout, cursorHide)
+	fmt.Fprint(os.Stdout, cursorHide)
 }
 
 func ShowCursor() {
-fmt.Fprint(os.Stdout, cursorShow)
+	fmt.Fprint(os.Stdout, cursorShow)
 }

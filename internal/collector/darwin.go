@@ -14,7 +14,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
+	"unsafe"
+
+	"golang.org/x/sys/unix"
 
 	"sumi/internal/model"
 )
@@ -34,9 +38,30 @@ type darwinCollector struct {
 	mu          sync.Mutex
 	diskReadPrev  map[string]diskIOSample // keyed by device name (e.g. "disk0")
 	diskWritePrev map[string]diskIOSample
+	// Static cache — populated once; never changes at runtime.
+	cacheOnce sync.Once
+	hostname  string
+	cpuCores  int
+	cpuModel  string
+}
+
+func (c *darwinCollector) initCache(ctx context.Context) {
+	c.cacheOnce.Do(func() {
+		c.hostname, _ = os.Hostname()
+		if out, err := runCmd(ctx, "sysctl", "-n", "hw.logicalcpu"); err == nil {
+			if n, err := strconv.Atoi(strings.TrimSpace(out)); err == nil {
+				c.cpuCores = n
+			}
+		}
+		if out, err := runCmd(ctx, "sysctl", "-n", "machdep.cpu.brand_string"); err == nil {
+			c.cpuModel = strings.TrimSpace(out)
+		}
+	})
 }
 
 func (c *darwinCollector) Collect(ctx context.Context) (model.Snapshot, error) {
+	c.initCache(ctx)
+
 	s := model.Snapshot{
 		Platform:  "darwin",
 		Timestamp: time.Now(),
@@ -49,6 +74,8 @@ func (c *darwinCollector) Collect(ctx context.Context) (model.Snapshot, error) {
 	go func() {
 		defer wg.Done()
 		s.CPU = collectCPU(ctx)
+		s.CPU.Cores = c.cpuCores  // use cached value
+		s.CPU.Model = c.cpuModel  // use cached value
 		s.Thermal.TempC = s.CPU.TempC
 		s.Thermal.Sensors = darwinThermalSensors(ctx, s.CPU.TempC)
 	}()
@@ -75,7 +102,7 @@ func (c *darwinCollector) Collect(ctx context.Context) (model.Snapshot, error) {
 	c.applyDiskIO(ctx, s.Disks)
 	s.Procs = collectProcs(ctx)
 	s.Battery = collectBatteryDarwin(ctx)
-	s.Hostname, _ = os.Hostname()
+	s.Hostname = c.hostname
 	s.Uptime = collectUptimeDarwin(ctx)
 
 	wg.Wait()
@@ -83,30 +110,27 @@ func (c *darwinCollector) Collect(ctx context.Context) (model.Snapshot, error) {
 	return s, nil
 }
 
-// collectCPU gathers CPU usage, core count, and model string on macOS.
-// Usage is estimated via a 1-second iostat(1) sample.
+// collectCPU gathers CPU usage and temperature on macOS.
+// Core count and model string are filled from the static cache by Collect().
 func collectCPU(ctx context.Context) model.CPU {
 	cpu := model.CPU{}
 
-	// Core count
-	if out, err := runCmd(ctx, "sysctl", "-n", "hw.logicalcpu"); err == nil {
-		if n, err := strconv.Atoi(strings.TrimSpace(out)); err == nil {
-			cpu.Cores = n
+	// CPU usage: two-sample delta via iostat -c 2 -w 1.
+	// iostat is significantly lighter than top as it doesn't enumerate processes.
+	// Output columns (last line): us sy id  (user, sys, idle percentages)
+	// Falls back to top -l 2 -n 0 if iostat is unavailable or fails to parse.
+	if out, err := runCmd(ctx, "iostat", "-c", "2", "-w", "1"); err == nil {
+		if idle := parseIdleFromIOStat(out); idle >= 0 {
+			cpu.Usage = 100.0 - idle
 		}
 	}
-
-	// CPU model
-	if out, err := runCmd(ctx, "sysctl", "-n", "machdep.cpu.brand_string"); err == nil {
-		cpu.Model = strings.TrimSpace(out)
-	}
-
-	// CPU usage: two-sample delta via top -l 2 (runs in parallel with net collector).
-	// top -l 2 -n 0 outputs two frames with the default 1-second interval;
-	// we take CPU idle% from the second frame for accurate recent-usage delta.
-	if out, err := runCmd(ctx, "top", "-l", "2", "-n", "0"); err == nil {
-		idle := parseCPUIdleFromTop(out)
-		if idle >= 0 {
-			cpu.Usage = 100.0 - idle
+	if cpu.Usage == 0 {
+		// Fallback: use top -l 2 (heavier, but widely available).
+		if out, err := runCmd(ctx, "top", "-l", "2", "-n", "0"); err == nil {
+			idle := parseCPUIdleFromTop(out)
+			if idle >= 0 {
+				cpu.Usage = 100.0 - idle
+			}
 		}
 	}
 
@@ -202,6 +226,58 @@ func parseSmartctlTemp(out string) float64 {
 		}
 	}
 	return 0
+}
+
+// parseIdleFromIOStat extracts idle% from the last data line of `iostat -c 2 -w 1`.
+// iostat output has a header identifying columns including "us sy id"; the data rows
+// contain those three CPU columns preceded by disk columns. We find the header row to
+// locate the "id" column index, then read the same column from the last data row.
+func parseIdleFromIOStat(out string) float64 {
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) < 3 {
+		return -1
+	}
+
+	// Find a header line containing "id" (idle column) and "us" (user column).
+	var idIdx int = -1
+	var headerLineIdx int = -1
+	for i, line := range lines {
+		fields := strings.Fields(line)
+		for j, f := range fields {
+			if f == "id" {
+				idIdx = j
+				headerLineIdx = i
+				break
+			}
+		}
+		if idIdx >= 0 {
+			break
+		}
+	}
+	if idIdx < 0 {
+		return -1
+	}
+
+	// The last data line follows the last header/blank line.
+	var lastData string
+	for i := headerLineIdx + 1; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) != "" {
+			lastData = lines[i]
+		}
+	}
+	if lastData == "" {
+		return -1
+	}
+
+	fields := strings.Fields(lastData)
+	if idIdx >= len(fields) {
+		return -1
+	}
+	v, err := strconv.ParseFloat(fields[idIdx], 64)
+	if err != nil {
+		return -1
+	}
+	return v
 }
 
 // parseCPUIdleFromTop extracts idle% from the last "CPU usage:" line in top -l 2 output.
@@ -589,9 +665,9 @@ func collectNet(ctx context.Context) model.Net {
 		}
 	}
 
-	rx0, tx0 := netstatBytes(ctx, iface)
+	rx0, tx0 := netBytesForIface(ctx, iface)
 	time.Sleep(1 * time.Second)
-	rx1, tx1 := netstatBytes(ctx, iface)
+	rx1, tx1 := netBytesForIface(ctx, iface)
 
 	if rx1 >= rx0 {
 		n.RxKBps = float64(rx1-rx0) / 1024.0
@@ -600,6 +676,62 @@ func collectNet(ctx context.Context) model.Net {
 		n.TxKBps = float64(tx1-tx0) / 1024.0
 	}
 	return n
+}
+
+// netBytesForIface returns cumulative rx/tx bytes for iface.
+// Tries the fast syscall path (NET_RT_IFLIST2) first; falls back to netstat.
+func netBytesForIface(ctx context.Context, iface string) (rx, tx uint64) {
+	if rx, tx, ok := netBytesSysctl(iface); ok {
+		return rx, tx
+	}
+	return netstatBytes(ctx, iface)
+}
+
+// netBytesSysctl reads cumulative rx/tx counters via NET_RT_IFLIST2 sysctl.
+// This is significantly faster than spawning netstat: it executes a single
+// in-process syscall and parses the raw bytes without forking.
+// Returns ok=false if the interface is not found or sysctl fails.
+func netBytesSysctl(iface string) (rx, tx uint64, ok bool) {
+	tab, err := syscall.RouteRIB(syscall.NET_RT_IFLIST2, 0)
+	if err != nil {
+		return 0, 0, false
+	}
+
+	for len(tab) >= unix.SizeofIfMsghdr2 {
+		hdr := (*unix.IfMsghdr2)(unsafe.Pointer(&tab[0]))
+		msgLen := int(hdr.Msglen)
+		if msgLen <= 0 || msgLen > len(tab) {
+			break
+		}
+		// RTM_IFINFO2 = 0x12; only process interface-info messages.
+		if hdr.Type == syscall.RTM_IFINFO2 {
+			// The interface name is stored in a sockaddr_dl that immediately follows
+			// the IfMsghdr2 header. Parse the sdl_nlen bytes after the sockaddr_dl
+			// fixed header (8 bytes) to get the interface name.
+			name := ifaceNameFromSockaddrDL(tab[unix.SizeofIfMsghdr2:msgLen])
+			if name == iface {
+				return hdr.Data.Ibytes, hdr.Data.Obytes, true
+			}
+		}
+		tab = tab[msgLen:]
+	}
+	return 0, 0, false
+}
+
+// ifaceNameFromSockaddrDL extracts the interface name from the sockaddr_dl
+// bytes that follow a routing message header on macOS/BSD.
+// sockaddr_dl layout (bytes): sdl_len(1) sdl_family(1) sdl_index(2) sdl_type(1)
+// sdl_nlen(1) sdl_alen(1) sdl_slen(1) sdl_data[IFNAMSIZ+...] (interface name first)
+func ifaceNameFromSockaddrDL(b []byte) string {
+	const hdrSize = 8 // fixed header before sdl_data
+	if len(b) < hdrSize {
+		return ""
+	}
+	nlen := int(b[5]) // sdl_nlen
+	if hdrSize+nlen > len(b) {
+		return ""
+	}
+	return string(b[hdrSize : hdrSize+nlen])
 }
 
 // primaryInterface returns the name of the first non-loopback, up interface

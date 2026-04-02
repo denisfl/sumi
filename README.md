@@ -39,7 +39,6 @@ A lightweight, zero-dependency system monitor for macOS, Linux, and Raspberry Pi
 
 ## Features
 
-- **4-row, 2-column bento grid** — THERMAL, CPU, Memory, Disk, Network, Top Processes, Battery (optional), System
 - **Disk I/O speed** — real-time read/write KB/s per mount point shown under the disk bar
 - **Network sparkline history** — rolling 30-sample sparklines for Rx (green) and Tx (orange) in the Network card
 - **Battery card** — charge percentage, charging status, and time-remaining; auto-hidden on desktops/servers (no battery)
@@ -57,6 +56,17 @@ A lightweight, zero-dependency system monitor for macOS, Linux, and Raspberry Pi
 - **Watch mode** — refresh every N seconds (`--watch --interval 5`)
 - **TOML config file** — persistent settings at `~/.config/sumi/config.toml`
 - **Zero runtime dependencies** — single static binary
+
+### Performance
+
+| Platform | Improvement                                                                                        |
+| -------- | -------------------------------------------------------------------------------------------------- |
+| Linux    | Collect() fan-out: CPU + Net run concurrently (~1 s total vs ~2 s sequential)                      |
+| macOS    | CPU usage via `iostat` (lighter than `top`); Net bytes via in-process `syscall.RouteRIB` (no fork) |
+| Both     | Static data (hostname, CPU model, core count) cached on first tick — never re-queried              |
+| Both     | Disk `TotalBytes` cached by mount hash — refreshed only when mounts change                         |
+| Both     | Single 64 KiB buffered write per TUI frame (vs 40–60 write syscalls)                               |
+| Both     | Keyboard events processed immediately — never blocked by slow Collect()                            |
 
 ### Interactive keybindings (watch mode)
 

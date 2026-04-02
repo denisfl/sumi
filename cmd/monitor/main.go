@@ -297,10 +297,45 @@ func main() {
 	}
 
 	runOnce(ctx, col, rdr, cpuRing, memRing, rxRing, txRing, doRender)
+
+	// snapCh carries completed snapshots from the background collector goroutine.
+	// Capacity 1 ensures the goroutine never blocks if the render loop is busy.
+	snapCh := make(chan model.Snapshot, 1)
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				snap, err := col.Collect(ctx)
+				if err != nil {
+					continue
+				}
+				// Non-blocking send: drop the snapshot if the render loop hasn't
+				// consumed the previous one yet (e.g. terminal is too slow).
+				select {
+				case snapCh <- snap:
+				default:
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	for {
 		select {
-		case <-ticker.C:
-			runOnce(ctx, col, rdr, cpuRing, memRing, rxRing, txRing, doRender)
+		case snap := <-snapCh:
+			cpuRing.Push(snap.CPU.Usage)
+			if snap.Mem.TotalBytes > 0 {
+				memRing.Push(float64(snap.Mem.UsedBytes) / float64(snap.Mem.TotalBytes) * 100.0)
+			}
+			rxRing.Push(snap.Net.RxKBps)
+			txRing.Push(snap.Net.TxKBps)
+			const sparkWidth = 30
+			snap.History.CPUSpark = cpuRing.Sparkline(sparkWidth)
+			snap.History.MemSpark = memRing.Sparkline(sparkWidth)
+			snap.History.NetRxSpark = rxRing.Sparkline(sparkWidth)
+			snap.History.NetTxSpark = txRing.Sparkline(sparkWidth)
+			doRender(snap)
 		case ch := <-keyCh:
 			handleKey(ch)
 		case <-ctx.Done():
