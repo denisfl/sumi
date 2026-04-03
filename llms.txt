@@ -40,6 +40,11 @@ sumi --list-themes
 - **BoxChars**: A set of 8 Unicode box-drawing characters for card borders. Four styles: rounded, sharp, double, bold.
 - **Config**: TOML file at `~/.config/sumi/config.toml`. CLI flags always override config file values.
 - **History Rings**: Fixed-capacity ring buffers (`internal/history.Ring`) updated each tick. Power sparklines for CPU, Mem, Net Rx, Net Tx (global, cap 120) and per-PID CPU/Mem (cap 60).
+- **Extended Net Metrics**: Per-snapshot fields on `model.Net` — `OpenConnections` (established TCP count), `PacketLossPct`/`LatencyMs` (gateway ping; -1 when unavailable), `TcpRetransmits` (Linux delta counter), `RxErrors`/`TxErrors` (interface error deltas). Collected via `ss -s`, `/proc/net/snmp`, `/proc/net/dev` (Linux) or `netstat`/routing table (macOS).
+- **Extended Disk Metrics**: Per-mount fields on `model.DiskInfo` — `InodesUsedPct` (from `df -i`), `AwaitMs` (avg I/O service time, Linux `iostat -x`; 0 on macOS), `SmartStatus` ("ok"/"warn"/"fail"/"" from `smartctl -H`).
+- **SystemLoad**: `model.SystemLoad` struct on `Snapshot` — `Load1/5/15`, `UptimeSeconds`, `FdUsedPct`, `ZombieProcs`, `ContextSwitchesPerSec`. Linux: `/proc/loadavg`, `/proc/uptime`, delta `/proc/stat ctxt`. macOS: `sysctl vm.loadavg`, `kern.boottime`, `vmstat`.
+- **SystemEvent**: `model.SystemEvent{Ts, Kind, Detail}` — kinds: `oom_kill`, `reboot`, `ssh_fail`, `disk_error`, `service_restart`. Linux collector implements `EventCollector` interface; `StartEventPusher` POSTs event slices to `<push_base>/events`.
+- **WireGuardInfo**: `*model.WireGuardInfo` on `Snapshot` (nil when `wg` is absent). Fields: `Interface`, `PeersTotal`, `PeersOnline` (last handshake <180 s), `LastHandshakeAge` (seconds), `TransferRxBytes`, `TransferTxBytes`. Cross-platform: parsed from `wg show all dump`.
 - **Detail Panel**: Per-process detail overlay rendered after the main view. Shows PPID, threads, FD count, cwd, start time, and CPU/Mem sparklines. Opened with the `d` key.
 - **Parallel Collect (Linux)**: `linuxCollector.Collect()` fans out into three `sync.WaitGroup` groups — Group A: CPU + Net (slow, ~1 s each, run concurrently); Group B: Mem/Disk/Procs/Thermal/Battery (fast reads); Group C: GPU. Total wall time ≈ 1 s vs ~2 s sequential.
 - **Static Cache**: `sync.Once` per platform collector (darwin + linux). Hostname, CPU model, and core count are read once on the first tick and reused for every subsequent tick.
@@ -147,11 +152,13 @@ Useful fields in the JSON object:
   "Uptime": "2d 03:14:22",
   "CPU": { "Usage": 34.2, "Cores": 10, "CoreUsages": [45.1, 22.3] },
   "Mem": { "TotalBytes": 17179869184, "UsedBytes": 9663676416, "FreeBytes": 7516192768, "SwapTotal": 2147483648, "SwapUsed": 536870912 },
-  "Disks": [{ "MountPoint": "/", "TotalBytes": 494384795648, "UsedBytes": 214748364800, "FreeBytes": 279636430848, "ReadKBps": 128.4, "WriteKBps": 32.1 }],
-  "Net": { "Interface": "en0", "IP": "192.168.1.10", "RxKBps": 18.4, "TxKBps": 2.1 },
+  "Disks": [{ "MountPoint": "/", "TotalBytes": 494384795648, "UsedBytes": 214748364800, "FreeBytes": 279636430848, "ReadKBps": 128.4, "WriteKBps": 32.1, "InodesUsedPct": 12.3, "AwaitMs": 0.4, "SmartStatus": "ok" }],
+  "Net": { "Interface": "en0", "IP": "192.168.1.10", "RxKBps": 18.4, "TxKBps": 2.1, "OpenConnections": 143, "PacketLossPct": 0.0, "LatencyMs": 1.45, "TcpRetransmits": 2, "RxErrors": 0, "TxErrors": 0 },
   "Thermal": { "TempC": 55.2, "ArmFreqMHz": 0, "GpuFreqMHz": 0, "Throttled": "" },
   "Battery": { "ChargePct": 87.0, "Charging": false, "TimeLeft": "2h 14m" },
   "Procs": [{ "Name": "chrome", "PID": 1234, "CPUPct": 22.1, "MemPct": 3.4, "Container": "" }],
+  "SystemLoad": { "Load1": 0.72, "Load5": 0.58, "Load15": 0.41, "UptimeSeconds": 86400, "FdUsedPct": 3.2, "ZombieProcs": 0, "ContextSwitchesPerSec": 1240.5 },
+  "WireGuard": { "Interface": "wg0", "PeersTotal": 3, "PeersOnline": 2, "LastHandshakeAge": 47, "TransferRxBytes": 1048576, "TransferTxBytes": 524288 },
   "History": { "CPUSpark": "▁▂▃▅▇", "MemSpark": "▃▃▄▄▅", "NetRxSpark": "▁▁▂▄▇", "NetTxSpark": "▁▁▁▂▁" }
 }
 ```
@@ -163,11 +170,15 @@ cmd/monitor/main.go          — entry point, flag parsing, theme loading, per-P
 internal/
   collector/
     darwin.go                — macOS: iostat (CPU delta, lighter than top), syscall.RouteRIB (net bytes, in-process), osx-cpu-temp/smctemp (thermal), sysctl (disk I/O + static cache), pmset (battery); sync.Once static cache for hostname/cpuCores/cpuModel
+    darwin_ext.go            — macOS v0.7 extended metrics: darwinExtCollector wraps darwinCollector; enriches Net (OpenConnections, PacketLossPct, LatencyMs, RxErrors, TxErrors), Disk (InodesUsedPct, SmartStatus), SystemLoad, WireGuard
     linux.go                 — Linux: /proc/stat, /proc/meminfo, /sys/class/net, /proc/diskstats (disk I/O), /sys/class/power_supply (battery), cgroup container detection
+    linux_ext.go             — Linux v0.7 extended metrics: linuxExtCollector wraps linuxCollector; enriches all Net/Disk/SystemLoad/WireGuard fields and implements EventCollector (dmesg + journalctl events)
+    ext_parsers.go           — Shared pure-function parsers (no build tag): parsePingStats, parseSmartHealth, parseDfInodes, parseSsEstab
+    wireguard.go             — collectWireGuard (cross-platform): runs `wg show all dump`, parseWireGuardDump returns *model.WireGuardInfo; nil when wg absent
     procdetail_darwin.go     — macOS ReadProcDetail via ps + lsof
     procdetail_linux.go      — Linux ReadProcDetail via /proc/PID/{status,fd,cwd,stat}
     rpi.go                   — Raspberry Pi extras: vcgencmd, thermal zone
-    collector.go             — Collector interface
+    collector.go             — Collector interface; EventCollector interface (CollectEvents(ctx, since) []model.SystemEvent)
   config/
     config.go                — Config struct, Load(), Default(), DefaultConfigContent
   model/
@@ -211,6 +222,10 @@ internal/
 **"Add a new theme"**: Create `internal/theme/themes/<name>.toml` with the 10 RGB color sections shown above. The `//go:embed themes/*.toml` directive picks it up automatically at build time.
 
 **"Add a new card"**: Add a field to `internal/model/snapshot.go`, collect data in `darwin.go`/`linux.go`, implement `renderXxxCard()` in `tui.go`, add it to the `renderFull()` call sequence and the default `widgets` list in `config.go`.
+
+**"Understand v0.7 extended metrics"**: `linuxExtCollector` (linux_ext.go) and `darwinExtCollector` (darwin_ext.go) are wrapper structs that call the base collector's `Collect()` then enrich the snapshot. `New()` in each platform file now returns the ext collector. Shared pure parsers live in `ext_parsers.go` (no build tag). WireGuard collection (`wireguard.go`) has no build tag — works wherever the `wg` CLI is installed.
+
+**"Understand SystemEvent push"**: `collector.EventCollector` interface is optional — detected in main.go via type assertion. `pusher.StartEventPusher()` polls `CollectEvents(ctx, since)` on each `PushInterval` tick and POSTs `[]model.SystemEvent` to `<PushURL base>/events`. The events URL is derived automatically by replacing the `/push` suffix with `/events`.
 
 **"Add a new flag"**: Declare with `flag.String/Bool/Int` in `main.go` after `flag.Parse()`, override the corresponding `cfg` field, pass updated values to `renderer.New(cfg, t, bc)`.
 

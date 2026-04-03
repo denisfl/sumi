@@ -25,7 +25,7 @@ import (
 
 // New returns the darwin collector.
 func New() Collector {
-	return &darwinCollector{}
+	return &darwinExtCollector{darwinCollector: &darwinCollector{}}
 }
 
 // diskIOSample holds a single cumulative read/write counter snapshot.

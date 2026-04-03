@@ -23,10 +23,12 @@ import (
 
 // New returns the linux collector (or Raspberry Pi collector when applicable).
 func New() Collector {
+	base := &linuxCollector{}
+	ext := &linuxExtCollector{linuxCollector: base}
 	if isRaspberryPi() {
-		return &rpiCollector{base: &linuxCollector{}}
+		return &rpiCollector{base: base}
 	}
-	return &linuxCollector{}
+	return ext
 }
 
 type linuxCollector struct {

@@ -45,6 +45,11 @@ A lightweight, zero-dependency system monitor for macOS, Linux, and Raspberry Pi
 - **Container badges** — `[d]` / `[k]` prefix in Top Processes when a process runs inside Docker or Kubernetes
 - **Process detail panel** — press `d` to open a per-process panel with PPID, threads, open FDs, cwd, start time, and scrolling CPU/Mem sparklines; press `d` or `Esc` to close
 - **NDJSON streaming** — `--watch --renderer json` emits one compact JSON object per line, pipe-friendly for `jq`/Grafana/Prometheus scrapers
+- **Extended net metrics (v0.7)** — established TCP connection count, gateway ping latency + packet-loss %, TCP retransmit delta, RX/TX interface errors
+- **Extended disk metrics (v0.7)** — inode saturation %, average I/O service time (`AwaitMs`), drive health via `smartctl` (`ok`/`warn`/`fail`)
+- **System load (v0.7)** — 1/5/15-minute load averages, uptime, file-descriptor saturation %, zombie process count, context-switches/sec
+- **System events (v0.7)** — OOM kills, disk errors, SSH failures, service restarts, reboots captured from `dmesg`/`journalctl` (Linux) and pushed to backend
+- **WireGuard monitoring (v0.7)** — peer count, online peers (last handshake <180 s), aggregate transfer bytes; cross-platform via `wg show all dump`
 - **6 built-in color themes** — tokyo-night (default), gruvbox, catppuccin-mocha, nord, dracula, one-dark
 - **4 border styles** — rounded (default), sharp, double, bold
 - **Compact mode** — condensed 4-line cards (`--compact`) for smaller terminals

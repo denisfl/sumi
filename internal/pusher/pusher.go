@@ -128,3 +128,78 @@ func sleep(ctx context.Context, d time.Duration) {
 	case <-time.After(d):
 	}
 }
+
+// StartEventPusher launches a background goroutine that polls for OS-level events
+// and pushes them to <push_url_base>/events.
+// getEvents is called once per interval and receives the time of the last successful poll.
+// Returns immediately; stops when ctx is cancelled.
+func StartEventPusher(ctx context.Context, cfg config.Config, clientVersion string,
+	getEvents func(since time.Time) []model.SystemEvent) {
+
+	interval := time.Duration(cfg.PushInterval) * time.Second
+	if interval <= 0 {
+		interval = time.Duration(cfg.Interval) * time.Second
+	}
+	if interval <= 0 {
+		interval = 60 * time.Second
+	}
+
+	// Derive events endpoint: replace trailing /push (or any path) with /events.
+	eventsURL := cfg.PushURL
+	if idx := strings.LastIndex(eventsURL, "/push"); idx >= 0 {
+		eventsURL = eventsURL[:idx] + "/events"
+	} else if !strings.HasSuffix(eventsURL, "/events") {
+		eventsURL += "/events"
+	}
+
+	client := &http.Client{Timeout: 15 * time.Second}
+
+	go func() {
+		last := time.Now().Add(-interval)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case t := <-ticker.C:
+				events := getEvents(last)
+				last = t
+				if len(events) == 0 {
+					continue
+				}
+				pushEvents(ctx, client, eventsURL, cfg.PushToken, clientVersion, events)
+			}
+		}
+	}()
+}
+
+// pushEvents POSTs a slice of SystemEvents to the events endpoint.
+func pushEvents(ctx context.Context, client *http.Client, url, token, clientVersion string, events []model.SystemEvent) {
+	body, err := json.Marshal(events)
+	if err != nil {
+		slog.Warn("pushEvents: marshal failed", "err", err)
+		return
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		slog.Warn("pushEvents: build request failed", "err", err)
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Sumi-Version", clientVersion)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		if ctx.Err() == nil {
+			slog.Warn("pushEvents: request failed", "err", err)
+		}
+		return
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK {
+		slog.Warn("pushEvents: unexpected status", "status", resp.StatusCode)
+	}
+}

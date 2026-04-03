@@ -313,6 +313,11 @@ func main() {
 
 	if cfg.PushEnabled && cfg.PushToken != "" {
 		pusher.Start(ctx, cfg, version, func() model.Snapshot { return lastSnap })
+		if ec, ok := col.(collector.EventCollector); ok {
+			pusher.StartEventPusher(ctx, cfg, version, func(since time.Time) []model.SystemEvent {
+				return ec.CollectEvents(ctx, since)
+			})
+		}
 	}
 
 	// snapCh carries completed snapshots from the background collector goroutine.

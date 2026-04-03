@@ -50,13 +50,16 @@ type Mem struct {
 
 // DiskInfo holds disk usage metrics in bytes for a single mount point.
 type DiskInfo struct {
-	UsedBytes  uint64
-	TotalBytes uint64
-	FreeBytes  uint64
-	MountPoint string
-	FSType     string
-	ReadKBps   float64 // read throughput in KB/s since last sample (0 when unavailable)
-	WriteKBps  float64 // write throughput in KB/s since last sample (0 when unavailable)
+	UsedBytes     uint64
+	TotalBytes    uint64
+	FreeBytes     uint64
+	MountPoint    string
+	FSType        string
+	ReadKBps      float64 // read throughput in KB/s since last sample (0 when unavailable)
+	WriteKBps     float64 // write throughput in KB/s since last sample (0 when unavailable)
+	InodesUsedPct float64 // inode saturation 0–100; 0 if filesystem has no inodes
+	AwaitMs       float64 // avg I/O service time in ms (Linux only, 0 on macOS)
+	SmartStatus   string  // "ok", "warn", "fail", or "" if smartctl unavailable
 }
 
 // GPUInfo holds GPU metrics. Nil when no supported GPU tool is available.
@@ -71,10 +74,45 @@ type GPUInfo struct {
 
 // Net holds network interface metrics.
 type Net struct {
-	Interface string
-	IP        string
-	RxKBps    float64
-	TxKBps    float64
+	Interface      string
+	IP             string
+	RxKBps         float64
+	TxKBps         float64
+	OpenConnections int     // total established TCP connections; 0 if unavailable
+	PacketLossPct   float64 // gateway ping packet loss 0–100; -1 if unavailable
+	LatencyMs       float64 // gateway ping avg RTT in ms; -1 if unavailable
+	TcpRetransmits  uint64  // delta TCP retransmit segments since last tick (Linux only)
+	RxErrors        uint64  // cumulative RX error delta since last tick
+	TxErrors        uint64  // cumulative TX error delta since last tick
+}
+
+// SystemLoad holds OS-level system pressure metrics outside of CPU/Mem.
+type SystemLoad struct {
+	Load1                 float64 // 1-minute load average
+	Load5                 float64 // 5-minute load average
+	Load15                float64 // 15-minute load average
+	UptimeSeconds         uint64  // seconds since last boot
+	FdUsedPct             float64 // open file-descriptor saturation 0–100
+	ZombieProcs           int     // number of zombie processes
+	ContextSwitchesPerSec float64 // context switches per second since last tick
+}
+
+// SystemEvent represents a discrete OS-level event detected by the event collector.
+type SystemEvent struct {
+	Ts     time.Time `json:"ts"`
+	Kind   string    `json:"kind"`   // "oom_kill", "reboot", "ssh_fail", "disk_error", "service_restart"
+	Detail string    `json:"detail"` // human-readable detail, may be empty
+}
+
+// WireGuardInfo holds aggregate metrics for all WireGuard interfaces on the host.
+// Nil when the wg tool is not installed or no WireGuard interfaces exist.
+type WireGuardInfo struct {
+	Interface         string // first interface name (or comma-joined if multiple)
+	PeersTotal        int    // total configured peer count
+	PeersOnline       int    // peers with last-handshake within 180 s
+	LastHandshakeAge  int64  // seconds since most recent handshake across all peers
+	TransferRxBytes   int64  // cumulative RX bytes for the interface
+	TransferTxBytes   int64  // cumulative TX bytes for the interface
 }
 
 // History holds pre-computed sparkline strings for the TUI renderer.
@@ -122,6 +160,9 @@ type Snapshot struct {
 	Hostname  string
 	Uptime    string // human-readable uptime string
 	Timestamp time.Time
+
+	SystemLoad  SystemLoad     // OS-level pressure metrics
+	WireGuard   *WireGuardInfo // nil when wg not present
 
 	// Injected by the push goroutine; absent from normal TUI / NDJSON output.
 	DeviceID      string `json:",omitempty"`
