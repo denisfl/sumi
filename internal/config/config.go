@@ -29,6 +29,12 @@ type Config struct {
 	CompactMode bool     `toml:"compact_mode"` // default false
 	Widgets     []string `toml:"widgets"`      // card order, default all
 	Alerts      Alerts   `toml:"alerts"`       // configurable alert thresholds
+
+	// Cloud push — opt-in background sync.
+	PushEnabled  bool   `toml:"push_enabled"`
+	PushURL      string `toml:"push_url"`
+	PushToken    string `toml:"push_token"`
+	PushInterval int    `toml:"push_interval"` // seconds between pushes; 0 = use Interval
 }
 
 // Default returns the default configuration.
@@ -40,6 +46,9 @@ func Default() Config {
 		BorderStyle: "rounded",
 		CompactMode: false,
 		Widgets:     []string{"thermal", "cpu", "memory", "disk", "network", "processes", "system"},
+		PushEnabled:  false,
+		PushURL:      "https://ingest.getsumi.dev/v1/push",
+		PushInterval: 60,
 	}
 }
 
@@ -129,4 +138,12 @@ disk_threshold = 0.0
 temp_threshold = 0.0
 # Emit terminal bell (\a) when an alert is active
 sound = false
+
+# ── Cloud push (optional) ───────────────────────────────────────────────────
+# Set push_enabled = true and fill push_token to stream snapshots to sumi cloud.
+# Get your token at https://app.getsumi.dev/settings/tokens
+push_enabled  = false
+push_url      = "https://ingest.getsumi.dev/v1/push"
+push_token    = ""
+push_interval = 60
 `

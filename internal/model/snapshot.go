@@ -122,4 +122,8 @@ type Snapshot struct {
 	Hostname  string
 	Uptime    string // human-readable uptime string
 	Timestamp time.Time
+
+	// Injected by the push goroutine; absent from normal TUI / NDJSON output.
+	DeviceID      string `json:",omitempty"`
+	ClientVersion string `json:",omitempty"`
 }

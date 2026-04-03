@@ -18,6 +18,7 @@ import (
 	"sumi/internal/config"
 	"sumi/internal/history"
 	"sumi/internal/model"
+	"sumi/internal/pusher"
 	"sumi/internal/renderer"
 	"sumi/internal/theme"
 )
@@ -106,7 +107,19 @@ func main() {
 	txRing := history.NewRing(ringCap)
 
 	if !*watch {
-		runOnce(ctx, col, rdr, cpuRing, memRing, rxRing, txRing, nil)
+		var singleSnap model.Snapshot
+		runOnce(ctx, col, rdr, cpuRing, memRing, rxRing, txRing, func(snap model.Snapshot) {
+			singleSnap = snap
+			if err := rdr.Render(snap); err != nil {
+				fmt.Fprintf(os.Stderr, "render error: %v\n", err)
+			}
+		})
+		if cfg.PushEnabled && cfg.PushToken != "" {
+			pushCtx, pushCancel := context.WithTimeout(ctx, 20*time.Second)
+			pusher.Start(pushCtx, cfg, version, func() model.Snapshot { return singleSnap })
+			<-pushCtx.Done()
+			pushCancel()
+		}
 		return
 	}
 
@@ -297,6 +310,10 @@ func main() {
 	}
 
 	runOnce(ctx, col, rdr, cpuRing, memRing, rxRing, txRing, doRender)
+
+	if cfg.PushEnabled && cfg.PushToken != "" {
+		pusher.Start(ctx, cfg, version, func() model.Snapshot { return lastSnap })
+	}
 
 	// snapCh carries completed snapshots from the background collector goroutine.
 	// Capacity 1 ensures the goroutine never blocks if the render loop is busy.
