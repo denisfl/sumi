@@ -134,6 +134,9 @@ func Run(ctx context.Context, cfg RunConfig) error {
 	}
 
 	fmt.Printf("sumi %s installed successfully\n", targetVersion)
+	if hint := detectRestartHint(); hint != "" {
+		fmt.Printf("note: restart your daemon to apply the update:\n  %s\n", hint)
+	}
 	return nil
 }
 
@@ -420,4 +423,65 @@ func copyFile(src, dst string) error {
 
 	_, err = io.Copy(out, in)
 	return err
+}
+
+// detectRestartHint returns a shell command the user should run to restart their
+// sumi daemon after an update, or "" when no managed service is detected.
+func detectRestartHint() string {
+	switch runtime.GOOS {
+	case "linux":
+		return detectSystemdHint()
+	case "darwin":
+		return detectLaunchdHint()
+	}
+	return ""
+}
+
+// detectSystemdHint checks whether a sumi systemd unit is active (system-level
+// first, then user-level) and returns the appropriate restart command.
+func detectSystemdHint() string {
+	out, err := exec.Command("systemctl", "is-active", "sumi").Output() // #nosec G204
+	if err == nil && strings.TrimSpace(string(out)) == "active" {
+		return "sudo systemctl restart sumi"
+	}
+	out, err = exec.Command("systemctl", "--user", "is-active", "sumi").Output() // #nosec G204
+	if err == nil && strings.TrimSpace(string(out)) == "active" {
+		return "systemctl --user restart sumi"
+	}
+	return ""
+}
+
+// detectLaunchdHint scans common launchd plist directories for a service whose
+// filename contains "sumi" and returns the matching kickstart command.
+func detectLaunchdHint() string {
+	dirs := []string{
+		"/Library/LaunchDaemons",
+		"/Library/LaunchAgents",
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		dirs = append(dirs, filepath.Join(home, "Library", "LaunchAgents"))
+	}
+
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if !strings.HasSuffix(name, ".plist") {
+				continue
+			}
+			if !strings.Contains(strings.ToLower(name), "sumi") {
+				continue
+			}
+			label := strings.TrimSuffix(name, ".plist")
+			if dir == "/Library/LaunchDaemons" {
+				return "sudo launchctl kickstart -k system/" + label
+			}
+			// User-level agent: requires the GUI UID domain.
+			return "launchctl kickstart -k gui/$(id -u)/" + label
+		}
+	}
+	return ""
 }
