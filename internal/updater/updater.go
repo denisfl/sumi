@@ -210,17 +210,10 @@ func fetchRelease(ctx context.Context, baseURL, version string) (*releaseInfo, e
 }
 
 // selectAsset returns the download URL and optional checksum URL for goos/goarch.
-// Expected asset naming: sumi_<os>_<arch>.tar.gz (GoReleaser convention).
+// Asset naming matches the release workflow: sumi-<os>-<arch>.tar.gz
+// (e.g. sumi-linux-amd64.tar.gz, sumi-darwin-arm64.tar.gz).
 func selectAsset(release *releaseInfo, goos, goarch string) (assetURL, sha256URL string, err error) {
-	// Map Go arch names to GoReleaser defaults.
-	arch := goarch
-	switch goarch {
-	case "amd64":
-		arch = "x86_64"
-	case "386":
-		arch = "i386"
-	}
-	wantName := fmt.Sprintf("sumi_%s_%s.tar.gz", goos, arch)
+	wantName := fmt.Sprintf("sumi-%s-%s.tar.gz", goos, goarch)
 	wantSHA := wantName + ".sha256"
 
 	for _, a := range release.Assets {
