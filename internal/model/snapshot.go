@@ -167,4 +167,8 @@ type Snapshot struct {
 	// Injected by the push goroutine; absent from normal TUI / NDJSON output.
 	DeviceID      string `json:",omitempty"`
 	ClientVersion string `json:",omitempty"`
+
+	// UpdateAvailable is the latest release tag when a newer version has been
+	// detected by the background update checker. Empty when up to date.
+	UpdateAvailable string `json:",omitempty"`
 }

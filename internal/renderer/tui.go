@@ -164,6 +164,9 @@ func (r *tuiRenderer) renderFull(s model.Snapshot, width int) error {
 
 	// Row 4: System (full width)
 	printCard(r.renderSystemCard(s, width))
+	if s.UpdateAvailable != "" {
+		r.renderUpdateBadge(s.UpdateAvailable, width)
+	}
 	return nil
 }
 
@@ -242,6 +245,9 @@ printRow(
 r.renderCompactCard("NET", r.compactNetLine(s), -1, half),
 r.renderCompactCard("SYSTEM", r.compactSysLine(s), -1, half),
 )
+if s.UpdateAvailable != "" {
+	r.renderUpdateBadge(s.UpdateAvailable, width)
+}
 return nil
 }
 
@@ -764,6 +770,18 @@ func (r *tuiRenderer) renderSystemCard(s model.Snapshot, w int) []string {
 
 	lines = append(lines, r.cardBottom(w))
 	return lines
+}
+
+// renderUpdateBadge writes a separator line and a one-line update notice to out.
+// It is called only when s.UpdateAvailable is non-empty.
+func (r *tuiRenderer) renderUpdateBadge(latestVersion string, w int) {
+	sep := r.tc.border + strings.Repeat("\u2500", w) + colReset
+	fmt.Fprint(out, sep+"\r\n")
+	badge := fmt.Sprintf(" %supdate available:%s %s%s%s  \u2192  %ssumi update%s",
+		colDim, colReset,
+		r.tc.cyan, latestVersion, colReset,
+		r.tc.green, colReset)
+	fmt.Fprint(out, badge+"\r\n")
 }
 
 // ---- Card border helpers ----

@@ -21,12 +21,20 @@ import (
 	"sumi/internal/pusher"
 	"sumi/internal/renderer"
 	"sumi/internal/theme"
+	"sumi/internal/updater"
 )
 
 // version is set at build time via -ldflags "-X main.version=vX.Y.Z".
 var version = "dev"
 
 func main() {
+	// Dispatch the "update" subcommand before the main flag set is parsed so that
+	// "sumi update [flags]" works without conflicting with the global flags.
+	if len(os.Args) > 1 && os.Args[1] == "update" {
+		runUpdateCmd(os.Args[2:])
+		return
+	}
+
 	// Load config file first (CLI flags override below)
 	cfg, err := config.Load()
 	if err != nil {
@@ -99,6 +107,10 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Update checker — created once, used in both single-shot and watch modes.
+	// Errors (e.g. no home dir) are silently ignored; checker is nil when unavailable.
+	checker, _ := updater.NewUpdateChecker(version)
+
 	// Spark rings — kept in watch mode; empty in single-shot mode.
 	const ringCap = 120
 	cpuRing := history.NewRing(ringCap)
@@ -109,11 +121,23 @@ func main() {
 	if !*watch {
 		var singleSnap model.Snapshot
 		runOnce(ctx, col, rdr, cpuRing, memRing, rxRing, txRing, func(snap model.Snapshot) {
+			if checker != nil {
+				snap.UpdateAvailable = checker.ReadCacheSync()
+			}
 			singleSnap = snap
 			if err := rdr.Render(snap); err != nil {
 				fmt.Fprintf(os.Stderr, "render error: %v\n", err)
 			}
+			// In JSON / pipe-friendly mode print the notice to stderr so stdout
+			// remains valid JSON.
+			if snap.UpdateAvailable != "" && *rendererName == "json" {
+				fmt.Fprintf(os.Stderr, "sumi: update available %s (run: sumi update)\n", snap.UpdateAvailable)
+			}
 		})
+		// Start async check to refresh the on-disk cache for the next invocation.
+		if checker != nil {
+			checker.CheckAsync(ctx)
+		}
 		if cfg.PushEnabled && cfg.PushToken != "" {
 			pushCtx, pushCancel := context.WithTimeout(ctx, 20*time.Second)
 			pusher.Start(pushCtx, cfg, version, func() model.Snapshot { return singleSnap })
@@ -279,6 +303,10 @@ func main() {
 	}
 
 	doRender := func(snap model.Snapshot) {
+		// Inject update availability from the background checker before rendering.
+		if checker != nil {
+			snap.UpdateAvailable = checker.CachedResult()
+		}
 		lastSnap = snap
 		// Update per-PID rings (task 23).
 		for _, p := range snap.Procs {
@@ -310,6 +338,11 @@ func main() {
 	}
 
 	runOnce(ctx, col, rdr, cpuRing, memRing, rxRing, txRing, doRender)
+
+	// Kick off background update check; result is available by the next tick.
+	if checker != nil {
+		checker.CheckAsync(ctx)
+	}
 
 	if cfg.PushEnabled && cfg.PushToken != "" {
 		pusher.Start(ctx, cfg, version, func() model.Snapshot { return lastSnap })
@@ -408,4 +441,30 @@ func writeDefaultConfig() {
 		os.Exit(1)
 	}
 	fmt.Println("config written to", path)
+}
+
+// runUpdateCmd handles the "sumi update" subcommand.
+func runUpdateCmd(args []string) {
+	fs := flag.NewFlagSet("sumi update", flag.ExitOnError)
+	checkOnly := fs.Bool("check", false, "check for a newer release without installing")
+	targetVersion := fs.String("version", "", "install a specific version (e.g. v0.7.2)")
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: sumi update [--check] [--version vX.Y.Z]\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	if err := updater.Run(ctx, updater.RunConfig{
+		CurrentVersion: version,
+		CheckOnly:      *checkOnly,
+		TargetVersion:  *targetVersion,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "sumi update: %v\n", err)
+		os.Exit(1)
+	}
 }
