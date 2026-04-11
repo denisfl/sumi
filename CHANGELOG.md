@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-04-11
+
+### Added
+
+- **Database monitoring** (`p1-db-monitoring`): new optional `[[database]]` config section supports PostgreSQL and MySQL/MariaDB; each configured database is polled concurrently via the new `internal/collector/db` package
+- Add `DBConnections`, `NormalizedQuery`, `DBSnapshot` types to `internal/model`; `Snapshot.Databases []DBSnapshot` carries per-database metrics in every push payload
+- PostgreSQL collector (`lib/pq`): reads connection state from `pg_stat_activity`, max connections from `pg_settings`, delta query stats from `pg_stat_statements` (optional extension, graceful fallback), ungranted lock count from `pg_locks`, replica lag from `pg_last_xact_replay_timestamp()`
+- MySQL/MariaDB collector (`go-sql-driver/mysql`): reads thread counts from `information_schema.global_status`, throughput delta from `Queries` counter, slow query digest from `performance_schema.events_statements_summary_by_digest` (graceful fallback), lock-wait count from `INFORMATION_SCHEMA.INNODB_TRX`, replica lag from `SHOW REPLICA STATUS`
+- DSN resolver in `db.Manager`: supports `${ENV_VAR}`, `file:/path`, and plain string DSNs; fails fast at startup if env var is unset
+- New **DB card** in TUI (`renderDBCard`): connection utilization bar (red >80%, yellow >60%), avg/p95 latency, queries/interval throughput, lock count, replication lag, and the top slow query template
+- New `db.Manager.Enrich(ctx, *Snapshot)` enrichment step called by `runOnce` and the watch-mode background goroutine; per-collector deadline 10 s; errors surfaced as `DBSnapshot.Error` without blocking other collectors or the main snapshot
+
+### Cloud integration (sumi-cloud)
+
+- Mirror `DBConnections`, `NormalizedQuery`, `DBSnapshot` types in `internal/model/snapshot.go`
+- Add `Databases []DBSnapshot` field to cloud `Snapshot`; the push handler stores the full snapshot as JSONB so DB metrics are automatically persisted without schema migration
+
+### Dependencies
+
+- Add `github.com/lib/pq v1.12.3` (pure-Go PostgreSQL driver)
+- Add `github.com/go-sql-driver/mysql v1.9.3` (pure-Go MySQL/MariaDB driver)
+
+## [0.9.0] - 2026-04-10
+
+### Fixed
+
+- `sumi update` now correctly resolves release asset names with dashes (`sumi-darwin-arm64.tar.gz`); falls back to underscore naming for binaries built before v0.9.0
+
 ## [0.6.0] - 2026-04-02
 
 ### Performance

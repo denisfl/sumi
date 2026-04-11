@@ -199,6 +199,43 @@ compact_mode = false
 
 # Card order (remove a name to hide that card)
 widgets = ["thermal", "cpu", "memory", "disk", "network", "processes", "system"]
+
+[alerts]
+# Alert when CPU usage exceeds threshold (0 = disabled)
+cpu_threshold = 0.0
+# Alert when memory usage exceeds threshold (0 = disabled)
+mem_threshold = 0.0
+# Alert when any disk usage exceeds threshold (0 = disabled)
+disk_threshold = 0.0
+# Alert when CPU temperature exceeds threshold in °C (0 = disabled)
+temp_threshold = 0.0
+# Emit terminal bell (\a) when an alert is active
+sound = false
+
+# ── Cloud push (optional) ───────────────────────────────────────────────────
+# Set push_enabled = true and fill push_token to stream snapshots to sumi cloud.
+# Get your token at https://app.getsumi.dev/settings/tokens
+push_enabled  = false
+push_url      = "https://ingest.getsumi.dev/v1/push"
+push_token    = ""
+push_interval = 60
+
+# ── Database monitoring (optional) ──────────────────────────────────────────
+# Add one [[database]] block per database to monitor.
+# DSN may be a literal connection string, an env reference "${VAR}", or a
+# file reference "file:/path/to/secret".
+
+# [[database]]
+# name       = "main-postgres"
+# driver     = "postgres"
+# dsn        = "${DATABASE_URL}"
+# interval_s = 30
+
+# [[database]]
+# name       = "analytics"
+# driver     = "mysql"
+# dsn        = "${ANALYTICS_DSN}"
+# interval_s = 60
 ```
 
 ### Config options

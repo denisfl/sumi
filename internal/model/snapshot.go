@@ -144,6 +144,37 @@ type ProcDetail struct {
 	MemSpark  string // sparkline of recent Mem usage (from history ring)
 }
 
+// DBConnections holds the connection pool state for a database instance.
+type DBConnections struct {
+	Active  int
+	Idle    int
+	Waiting int
+	Max     int
+}
+
+// NormalizedQuery holds aggregated stats for one normalised query pattern.
+type NormalizedQuery struct {
+	QueryHash string  // hex SHA-256 of the normalised template
+	Calls     int64
+	TotalMs   float64
+	MeanMs    float64
+	Template  string  // query text with literals replaced by placeholders
+}
+
+// DBSnapshot holds one point-in-time snapshot for a single configured database.
+type DBSnapshot struct {
+	Name            string
+	Driver          string           // "postgres" | "mysql"
+	Connections     DBConnections
+	QueryThroughput float64          // queries/s since last tick; 0 when unavailable
+	AvgLatencyMs    float64          // mean query latency ms; 0 when unavailable
+	P95LatencyMs    float64          // p95 query latency ms; 0 when unavailable
+	ActiveLockCount int              // number of ungranted / blocked lock requests
+	SlowQueries     []NormalizedQuery // top-5 by total_time since last tick
+	ReplicationLagS float64          // seconds of replica lag; -1 if not a replica or unavailable
+	Error           string           // non-empty when collector encountered an error this tick
+}
+
 // Snapshot is the complete point-in-time view of system metrics.
 // Any field that could not be collected is left at its zero value.
 type Snapshot struct {
@@ -171,4 +202,8 @@ type Snapshot struct {
 	// UpdateAvailable is the latest release tag when a newer version has been
 	// detected by the background update checker. Empty when up to date.
 	UpdateAvailable string `json:",omitempty"`
+
+	// Databases holds snapshots for each configured [[database]] entry.
+	// Empty when no databases are configured.
+	Databases []DBSnapshot `json:",omitempty"`
 }

@@ -212,22 +212,36 @@ func fetchRelease(ctx context.Context, baseURL, version string) (*releaseInfo, e
 // selectAsset returns the download URL and optional checksum URL for goos/goarch.
 // Asset naming matches the release workflow: sumi-<os>-<arch>.tar.gz
 // (e.g. sumi-linux-amd64.tar.gz, sumi-darwin-arm64.tar.gz).
+// Legacy releases (pre-v0.9.0) used underscores (sumi_os_arch.tar.gz); both
+// variants are tried so that binaries built before the naming change can still
+// locate assets in newer releases.
 func selectAsset(release *releaseInfo, goos, goarch string) (assetURL, sha256URL string, err error) {
-	wantName := fmt.Sprintf("sumi-%s-%s.tar.gz", goos, goarch)
-	wantSHA := wantName + ".sha256"
+	// Primary: canonical dash-separated name (current convention).
+	dashName := fmt.Sprintf("sumi-%s-%s.tar.gz", goos, goarch)
+	// Fallback: legacy underscore-separated name (pre-v0.9.0).
+	underName := fmt.Sprintf("sumi_%s_%s.tar.gz", goos, goarch)
 
 	for _, a := range release.Assets {
 		switch a.Name {
-		case wantName:
+		case dashName:
 			assetURL = a.BrowserDownloadURL
-		case wantSHA:
+			sha256URL = "" // reset; prefer dash-based SHA too
+		case dashName + ".sha256":
 			sha256URL = a.BrowserDownloadURL
+		case underName:
+			if assetURL == "" { // only use legacy name when dash variant absent
+				assetURL = a.BrowserDownloadURL
+			}
+		case underName + ".sha256":
+			if sha256URL == "" {
+				sha256URL = a.BrowserDownloadURL
+			}
 		}
 	}
 
 	if assetURL == "" {
 		return "", "", fmt.Errorf(
-			"no release asset found for %s/%s (expected %s)", goos, goarch, wantName,
+			"no release asset found for %s/%s (expected %s)", goos, goarch, dashName,
 		)
 	}
 	return assetURL, sha256URL, nil
