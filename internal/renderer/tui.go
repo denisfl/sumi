@@ -167,6 +167,12 @@ func (r *tuiRenderer) renderFull(s model.Snapshot, width int) error {
 	if s.UpdateAvailable != "" {
 		r.renderUpdateBadge(s.UpdateAvailable, width)
 	}
+
+	// Databases (full width, one card per DB, optional)
+	for i := range s.Databases {
+		fmt.Fprint(out, "\r\n")
+		printCard(r.renderDBCard(&s.Databases[i], width))
+	}
 	return nil
 }
 
@@ -723,6 +729,83 @@ func (r *tuiRenderer) renderBatteryCard(s model.Snapshot, w int) []string {
 	lines = append(lines, r.cardLine(" "+r.progressBar(b.ChargePct/100.0, barW), w))
 	lines = append(lines, r.cardBottom(w))
 	return lines
+}
+
+func (r *tuiRenderer) renderDBCard(db *model.DBSnapshot, w int) []string {
+	title := fmt.Sprintf("DB · %s", db.Name)
+	lines := []string{r.cardTop(title, w), r.cardSep(w)}
+
+	if db.Error != "" {
+		errLine := fmt.Sprintf(" %serror:%s %s%s%s", colDim, colReset, r.tc.red, db.Error, colReset)
+		lines = append(lines, r.cardLine(errLine, w))
+		lines = append(lines, r.cardBottom(w))
+		return lines
+	}
+
+	conn := db.Connections
+	// Connections bar
+	connPct := 0.0
+	if conn.Max > 0 {
+		connPct = float64(conn.Active) / float64(conn.Max) * 100.0
+	}
+	barW := w - 4
+	if barW < 2 {
+		barW = 2
+	}
+	connCol := r.pctColor(connPct)
+	connStr := fmt.Sprintf(" %s%-12s%s %s%d%s/%d  %sidl %d%s  %swait %d%s",
+		colDim, "connections", colReset,
+		connCol, conn.Active, colReset, conn.Max,
+		colDim, conn.Idle, colReset,
+		colDim, conn.Waiting, colReset)
+	lines = append(lines, r.cardLine(connStr, w))
+	lines = append(lines, r.cardLine(" "+r.progressBar(connPct/100.0, barW), w))
+
+	// Latency + throughput
+	latStr := fmt.Sprintf(" %s%-12s%s avg %s%.1fms%s  p95 %s%.1fms%s   %s%-8s%s %s%.0f%s/interval",
+		colDim, "queries", colReset,
+		r.tc.cyan, db.AvgLatencyMs, colReset,
+		r.tc.cyan, db.P95LatencyMs, colReset,
+		colDim, "throughput", colReset,
+		r.tc.text, db.QueryThroughput, colReset)
+	lines = append(lines, r.cardLine(latStr, w))
+
+	// Locks + replication lag
+	lockCol := r.tc.green
+	if db.ActiveLockCount > 0 {
+		lockCol = r.tc.red
+	}
+	lagStr := "primary"
+	if db.ReplicationLagS >= 0 {
+		lagStr = fmt.Sprintf("%.1fs lag", db.ReplicationLagS)
+	}
+	miscStr := fmt.Sprintf(" %s%-12s%s %s%d%s  %s%-8s%s %s%s%s",
+		colDim, "locks", colReset, lockCol, db.ActiveLockCount, colReset,
+		colDim, "repl", colReset, r.tc.text, lagStr, colReset)
+	lines = append(lines, r.cardLine(miscStr, w))
+
+	// Top slow query (first one only — most impactful)
+	if len(db.SlowQueries) > 0 {
+		lines = append(lines, r.cardSep(w))
+		q := db.SlowQueries[0]
+		qLine := fmt.Sprintf(" %sslow:%s %.1fms×%d  %s%s%s",
+			colDim, colReset, q.MeanMs, q.Calls,
+			r.tc.text, truncateVisual(q.Template, w-30), colReset)
+		lines = append(lines, r.cardLine(qLine, w))
+	}
+
+	lines = append(lines, r.cardBottom(w))
+	return lines
+}
+
+func truncateVisual(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	if max < 1 {
+		return ""
+	}
+	return s[:max] + "…"
 }
 
 func (r *tuiRenderer) renderSystemCard(s model.Snapshot, w int) []string {

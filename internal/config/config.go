@@ -9,6 +9,16 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+// Database holds connection settings for a single monitored database instance.
+// The DSN may reference an environment variable ("${VAR}") or a file ("file:/path");
+// plain connection strings are accepted for development but should be avoided in production.
+type Database struct {
+	Name      string `toml:"name"`       // display label in TUI / JSON output
+	Driver    string `toml:"driver"`     // "postgres" | "mysql"
+	DSN       string `toml:"dsn"`        // connection string or reference
+	IntervalS int    `toml:"interval_s"` // collection interval; 0 uses the global interval
+}
+
 // Alerts holds configurable alert thresholds.
 // A zero value means the alert is disabled.
 type Alerts struct {
@@ -28,7 +38,8 @@ type Config struct {
 	BorderStyle string   `toml:"border_style"` // "rounded" | "sharp" | "double" | "bold", default "rounded"
 	CompactMode bool     `toml:"compact_mode"` // default false
 	Widgets     []string `toml:"widgets"`      // card order, default all
-	Alerts      Alerts   `toml:"alerts"`       // configurable alert thresholds
+	Alerts      Alerts     `toml:"alerts"`      // configurable alert thresholds
+	Databases   []Database `toml:"database"`    // optional [[database]] table array
 
 	// Cloud push — opt-in background sync.
 	PushEnabled  bool   `toml:"push_enabled"`
@@ -146,4 +157,21 @@ push_enabled  = false
 push_url      = "https://ingest.getsumi.dev/v1/push"
 push_token    = ""
 push_interval = 60
+
+# ── Database monitoring (optional) ──────────────────────────────────────────
+# Add one [[database]] block per database to monitor.
+# DSN may be a literal connection string, an env reference "${VAR}", or a
+# file reference "file:/path/to/secret".
+
+# [[database]]
+# name       = "main-postgres"
+# driver     = "postgres"
+# dsn        = "${DATABASE_URL}"
+# interval_s = 30
+
+# [[database]]
+# name       = "analytics"
+# driver     = "mysql"
+# dsn        = "${ANALYTICS_DSN}"
+# interval_s = 60
 `
