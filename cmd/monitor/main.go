@@ -15,6 +15,7 @@ import (
 	"golang.org/x/term"
 
 	"sumi/internal/collector"
+	"sumi/internal/collector/db"
 	"sumi/internal/config"
 	"sumi/internal/history"
 	"sumi/internal/model"
@@ -107,6 +108,14 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Database collectors — zero or more, based on [[database]] config entries.
+	dbMgr, err := db.NewManager(cfg.Databases)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer dbMgr.Close()
+
 	// Update checker — created once, used in both single-shot and watch modes.
 	// Errors (e.g. no home dir) are silently ignored; checker is nil when unavailable.
 	checker, _ := updater.NewUpdateChecker(version)
@@ -120,7 +129,7 @@ func main() {
 
 	if !*watch {
 		var singleSnap model.Snapshot
-		runOnce(ctx, col, rdr, cpuRing, memRing, rxRing, txRing, func(snap model.Snapshot) {
+		runOnce(ctx, col, dbMgr, rdr, cpuRing, memRing, rxRing, txRing, func(snap model.Snapshot) {
 			if checker != nil {
 				snap.UpdateAvailable = checker.ReadCacheSync()
 			}
@@ -337,7 +346,7 @@ func main() {
 		}
 	}
 
-	runOnce(ctx, col, rdr, cpuRing, memRing, rxRing, txRing, doRender)
+	runOnce(ctx, col, dbMgr, rdr, cpuRing, memRing, rxRing, txRing, doRender)
 
 	// Kick off background update check; result is available by the next tick.
 	if checker != nil {
@@ -364,6 +373,7 @@ func main() {
 				if err != nil {
 					continue
 				}
+				dbMgr.Enrich(ctx, &snap)
 				// Non-blocking send: drop the snapshot if the render loop hasn't
 				// consumed the previous one yet (e.g. terminal is too slow).
 				select {
@@ -399,13 +409,14 @@ func main() {
 	}
 }
 
-func runOnce(ctx context.Context, col collector.Collector, rdr renderer.Renderer,
+func runOnce(ctx context.Context, col collector.Collector, dbMgr *db.Manager, rdr renderer.Renderer,
 	cpuRing, memRing, rxRing, txRing *history.Ring, renderFn func(model.Snapshot)) {
 	snap, err := col.Collect(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "collect error: %v\n", err)
 		return
 	}
+	dbMgr.Enrich(ctx, &snap)
 	cpuRing.Push(snap.CPU.Usage)
 	if snap.Mem.TotalBytes > 0 {
 		memRing.Push(float64(snap.Mem.UsedBytes) / float64(snap.Mem.TotalBytes) * 100.0)
