@@ -45,6 +45,7 @@ A lightweight, zero-dependency system monitor for macOS, Linux, and Raspberry Pi
 - **Container badges** — `[d]` / `[k]` prefix in Top Processes when a process runs inside Docker or Kubernetes
 - **Process detail panel** — press `d` to open a per-process panel with PPID, threads, open FDs, cwd, start time, and scrolling CPU/Mem sparklines; press `d` or `Esc` to close
 - **NDJSON streaming** — `--watch --renderer json` emits one compact JSON object per line, pipe-friendly for `jq`/Grafana/Prometheus scrapers
+- **Database monitoring (v0.9)** — optional `[[database]]` blocks in the config file; collects connection utilization, avg/p95 query latency, throughput, lock count, replication lag, and top slow queries for PostgreSQL and MySQL/MariaDB; displayed as full-width DB cards below the System card; supports DSN via plain string, `${ENV_VAR}`, or `file:/path`
 - **Extended net metrics (v0.7)** — established TCP connection count, gateway ping latency + packet-loss %, TCP retransmit delta, RX/TX interface errors
 - **Extended disk metrics (v0.7)** — inode saturation %, average I/O service time (`AwaitMs`), drive health via `smartctl` (`ok`/`warn`/`fail`)
 - **System load (v0.7)** — 1/5/15-minute load averages, uptime, file-descriptor saturation %, zombie process count, context-switches/sec
@@ -213,6 +214,39 @@ widgets = ["thermal", "cpu", "memory", "disk", "network", "processes", "system"]
 | `widgets`      | []string | all             | Card order; remove a name to hide that card        |
 
 CLI flags always override config file values.
+
+### Database monitoring
+
+Add one `[[database]]` block per database to `~/.config/sumi/config.toml`:
+
+```toml
+[[database]]
+name       = "prod-postgres"
+driver     = "postgres"
+dsn        = "host=db.example.com port=5432 user=mon password=secret dbname=app sslmode=require"
+interval_s = 30
+
+[[database]]
+name       = "analytics"
+driver     = "mysql"
+dsn        = "${MYSQL_DSN}"         # reads DSN from environment variable
+interval_s = 60
+```
+
+Supported drivers: `postgres` / `postgresql`, `mysql` / `mariadb`.
+
+DSN formats:
+- **Plain string** — used as-is (dev use only; prefer env var or file for credentials)
+- **`${ENV_VAR}`** — value read from the named environment variable at startup
+- **`file:/absolute/path`** — first line of the file, trimmed; suitable for secrets mounted by Docker/k8s
+
+Each DB card shows:
+- Connection utilization bar (green < 60 %, yellow < 85 %, red ≥ 85 %)
+- Average and p95 query latency, queries-per-interval throughput
+- Active lock count (highlighted red if > 0), replication lag / `primary` label
+- Top slow query template (requires `pg_stat_statements` on PostgreSQL / `performance_schema` on MySQL)
+
+The DB section is hidden entirely when no `[[database]]` entries are configured.
 
 ### Custom themes
 
