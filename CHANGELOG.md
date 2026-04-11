@@ -4,7 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+<<<<<<< HEAD
 ## [0.9.1] - 2026-04-11
+=======
+## [0.9.0] - 2026-04-10
+>>>>>>> origin/master
 
 ### Added
 
@@ -20,17 +24,37 @@ All notable changes to this project will be documented in this file.
 
 - Mirror `DBConnections`, `NormalizedQuery`, `DBSnapshot` types in `internal/model/snapshot.go`
 - Add `Databases []DBSnapshot` field to cloud `Snapshot`; the push handler stores the full snapshot as JSONB so DB metrics are automatically persisted without schema migration
+<<<<<<< HEAD
+=======
+- Query DB metrics from the `device_metrics` hypertable using JSONB operators, e.g.:
+  ```sql
+  -- Connection utilization over time for a specific database
+  SELECT ts,
+         (payload->'Databases'->0->>'Name')                                      AS db_name,
+         (payload->'Databases'->0->'Connections'->>'Active')::int                AS active,
+         (payload->'Databases'->0->'Connections'->>'Max')::int                   AS max_conns
+    FROM device_metrics
+   WHERE device_id = '<device_id>'
+     AND payload->'Databases' IS NOT NULL
+   ORDER BY ts DESC
+   LIMIT 100;
+  ```
+>>>>>>> origin/master
 
 ### Dependencies
 
 - Add `github.com/lib/pq v1.12.3` (pure-Go PostgreSQL driver)
 - Add `github.com/go-sql-driver/mysql v1.9.3` (pure-Go MySQL/MariaDB driver)
 
+<<<<<<< HEAD
 ## [0.9.0] - 2026-04-10
 
 ### Fixed
 
 - `sumi update` now correctly resolves release asset names with dashes (`sumi-darwin-arm64.tar.gz`); falls back to underscore naming for binaries built before v0.9.0
+=======
+## [0.8.1] - 2026-04-10
+>>>>>>> origin/master
 
 ## [0.6.0] - 2026-04-02
 

@@ -44,6 +44,8 @@ sumi --list-themes
 - **Extended Disk Metrics**: Per-mount fields on `model.DiskInfo` — `InodesUsedPct` (from `df -i`), `AwaitMs` (avg I/O service time, Linux `iostat -x`; 0 on macOS), `SmartStatus` ("ok"/"warn"/"fail"/"" from `smartctl -H`).
 - **SystemLoad**: `model.SystemLoad` struct on `Snapshot` — `Load1/5/15`, `UptimeSeconds`, `FdUsedPct`, `ZombieProcs`, `ContextSwitchesPerSec`. Linux: `/proc/loadavg`, `/proc/uptime`, delta `/proc/stat ctxt`. macOS: `sysctl vm.loadavg`, `kern.boottime`, `vmstat`.
 - **SystemEvent**: `model.SystemEvent{Ts, Kind, Detail}` — kinds: `oom_kill`, `reboot`, `ssh_fail`, `disk_error`, `service_restart`. Linux collector implements `EventCollector` interface; `StartEventPusher` POSTs event slices to `<push_base>/events`.
+- **Database monitoring**: Optional `[[database]]` blocks in `config.toml`. Each block spawns a `db.Collector` (`pgCollector` or `mysqlCollector`). `db.Manager.Enrich(ctx, *Snapshot)` runs all collectors concurrently with a 10 s per-DB deadline and appends results to `snap.Databases`. The DB section in the TUI is hidden when `s.Databases` is nil/empty. DSN resolver supports `${ENV_VAR}`, `file:/path`, or plain strings.
+- **DBSnapshot** (`model.DBSnapshot`): `Name`, `Driver`, `Connections` (`DBConnections{Active,Idle,Waiting,Max}`), `QueryThroughput`, `AvgLatencyMs`, `P95LatencyMs`, `ActiveLockCount`, `SlowQueries []NormalizedQuery`, `ReplicationLagS` (-1 = primary), `Error`. Appended to `Snapshot.Databases []DBSnapshot` (JSON `omitempty`).
 - **WireGuardInfo**: `*model.WireGuardInfo` on `Snapshot` (nil when `wg` is absent). Fields: `Interface`, `PeersTotal`, `PeersOnline` (last handshake <180 s), `LastHandshakeAge` (seconds), `TransferRxBytes`, `TransferTxBytes`. Cross-platform: parsed from `wg show all dump`.
 - **Detail Panel**: Per-process detail overlay rendered after the main view. Shows PPID, threads, FD count, cwd, start time, and CPU/Mem sparklines. Opened with the `d` key.
 - **Parallel Collect (Linux)**: `linuxCollector.Collect()` fans out into three `sync.WaitGroup` groups — Group A: CPU + Net (slow, ~1 s each, run concurrently); Group B: Mem/Disk/Procs/Thermal/Battery (fast reads); Group C: GPU. Total wall time ≈ 1 s vs ~2 s sequential.
@@ -159,7 +161,20 @@ Useful fields in the JSON object:
   "Procs": [{ "Name": "chrome", "PID": 1234, "CPUPct": 22.1, "MemPct": 3.4, "Container": "" }],
   "SystemLoad": { "Load1": 0.72, "Load5": 0.58, "Load15": 0.41, "UptimeSeconds": 86400, "FdUsedPct": 3.2, "ZombieProcs": 0, "ContextSwitchesPerSec": 1240.5 },
   "WireGuard": { "Interface": "wg0", "PeersTotal": 3, "PeersOnline": 2, "LastHandshakeAge": 47, "TransferRxBytes": 1048576, "TransferTxBytes": 524288 },
-  "History": { "CPUSpark": "▁▂▃▅▇", "MemSpark": "▃▃▄▄▅", "NetRxSpark": "▁▁▂▄▇", "NetTxSpark": "▁▁▁▂▁" }
+  "History": { "CPUSpark": "▁▂▃▅▇", "MemSpark": "▃▃▄▄▅", "NetRxSpark": "▁▁▂▄▇", "NetTxSpark": "▁▁▁▂▁" },
+  "Databases": [
+    {
+      "Name": "prod-postgres",
+      "Driver": "postgres",
+      "Connections": { "Active": 12, "Idle": 8, "Waiting": 0, "Max": 100 },
+      "QueryThroughput": 340.0,
+      "AvgLatencyMs": 1.2,
+      "P95LatencyMs": 4.8,
+      "ActiveLockCount": 0,
+      "SlowQueries": [{ "QueryHash": "a1b2c3", "Calls": 5, "TotalMs": 620.0, "MeanMs": 124.0, "Template": "SELECT * FROM orders WHERE user_id = $1" }],
+      "ReplicationLagS": -1
+    }
+  ]
 }
 ```
 
@@ -179,6 +194,10 @@ internal/
     procdetail_linux.go      — Linux ReadProcDetail via /proc/PID/{status,fd,cwd,stat}
     rpi.go                   — Raspberry Pi extras: vcgencmd, thermal zone
     collector.go             — Collector interface; EventCollector interface (CollectEvents(ctx, since) []model.SystemEvent)
+    db/
+      db.go                  — db.Collector interface, db.Manager (NewManager, Enrich, Close), resolveDSN (env var / file / plain string)
+      postgres.go            — pgCollector: pg_stat_activity (connections), pg_settings (max_connections), pg_stat_statements (throughput + slow queries, optional), pg_locks (ungranted count), pg_last_xact_replay_timestamp (replica lag)
+      mysql.go               — mysqlCollector: information_schema.global_status (threads), Queries counter delta (throughput), performance_schema.events_statements_summary_by_digest (slow queries, optional), INNODB_TRX (lock waits), SHOW REPLICA STATUS (lag)
   config/
     config.go                — Config struct, Load(), Default(), DefaultConfigContent
   model/
@@ -224,6 +243,10 @@ internal/
 **"Add a new card"**: Add a field to `internal/model/snapshot.go`, collect data in `darwin.go`/`linux.go`, implement `renderXxxCard()` in `tui.go`, add it to the `renderFull()` call sequence and the default `widgets` list in `config.go`.
 
 **"Understand v0.7 extended metrics"**: `linuxExtCollector` (linux_ext.go) and `darwinExtCollector` (darwin_ext.go) are wrapper structs that call the base collector's `Collect()` then enrich the snapshot. `New()` in each platform file now returns the ext collector. Shared pure parsers live in `ext_parsers.go` (no build tag). WireGuard collection (`wireguard.go`) has no build tag — works wherever the `wg` CLI is installed.
+
+**"Add a database to monitor"**: Add a `[[database]]` block to `~/.config/sumi/config.toml` with `name`, `driver` (`postgres`/`mysql`), `dsn`, and optionally `interval_s`. DSN can be a plain string, `${ENV_VAR}`, or `file:/path`. The new DB card appears automatically below the System card.
+
+**"Understand DB monitoring"**: `internal/collector/db/db.go` defines `Collector` interface and `Manager`. `NewManager(cfgs)` resolves DSNs and creates one `pgCollector` or `mysqlCollector` per config entry. `Manager.Enrich(ctx, snap)` fans out concurrently (10 s deadline each) and appends `DBSnapshot` results to `snap.Databases`. On the TUI side, `renderFull()` in `tui.go` loops over `s.Databases` — when the slice is nil, the section is hidden entirely. DB metrics are also streamed in the JSON/NDJSON output via `Snapshot.Databases` (`omitempty`).
 
 **"Understand SystemEvent push"**: `collector.EventCollector` interface is optional — detected in main.go via type assertion. `pusher.StartEventPusher()` polls `CollectEvents(ctx, since)` on each `PushInterval` tick and POSTs `[]model.SystemEvent` to `<PushURL base>/events`. The events URL is derived automatically by replacing the `/push` suffix with `/events`.
 
